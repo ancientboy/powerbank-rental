@@ -1,4 +1,4 @@
-name: Verify mock rental application
+name: Verify production and isolated demo
 on: [push, pull_request]
 jobs:
   verify:

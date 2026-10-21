@@ -1,14 +1,19 @@
 {
-  "name": "voltgo-rental-demo",
-  "version": "1.0.0",
+  "name": "voltgo-powerbank-rental",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
     "build": "node scripts/build.mjs",
-    "dev": "node scripts/dev.mjs",
-    "check": "node --check src/domain.mjs && node --check src/api.mjs && node --check public/app.js && node --check src/wscharge.mjs",
-    "verify:build": "node scripts/verify-build.mjs"
+    "dev": "node scripts/start.mjs",
+    "check": "node --check src/domain.mjs && node --check src/api.mjs && node --check public/app.js && node --check src/wscharge.mjs && node --check src/production-api.mjs && node --check src/production-store.mjs && node --check src/production-config.mjs && node --check src/production-google.mjs && node --check scripts/start.mjs && node --check scripts/admin.mjs && node --check production-public/app.js && node --check production-public/admin.js && node --check scripts/backup.mjs",
+    "verify:build": "node scripts/verify-build.mjs",
+    "start": "node scripts/start.mjs",
+    "admin": "node scripts/admin.mjs",
+    "demo": "node scripts/dev.mjs",
+    "build:demo": "node scripts/build-demo.mjs",
+    "backup": "node scripts/backup.mjs"
   },
   "engines": {
     "node": ">=24"

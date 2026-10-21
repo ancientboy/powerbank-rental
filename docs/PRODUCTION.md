@@ -1,0 +1,84 @@
+# 正式运行、更新与接入指南
+
+## 1. 部署前保留现状
+
+先确认旧应用目录、进程管理方式、反向代理和数据位置。不要覆盖 `.local/demo.sqlite`、旧 `.env`、上传文件或供应商资料，不要直接运行清库命令。旧演示账户不是已验证身份，不可转换为正式用户/管理员；旧支付不是财务记录，旧机柜不是实际库存。将旧数据保留在独立只读归档，不把它导入新生产库。
+
+本版本使用新文件 `production.sqlite` 和独立表结构；初次启动创建 schema_migrations version 1，重复启动不会清空数据。生产目录必须持久化，不能放在每次发布删除的临时目录。当前仅支持单个 Node 进程和单台主机 SQLite；不要开启 PM2 cluster 或多实例写同一文件。
+
+## 2. 构建和文件布局
+
+需要官方 Node.js 24。执行 npm ci --ignore-scripts、npm run check、npm test、npm run build、npm run verify:build。dist 是普通 Node 服务包，入口 scripts/start.mjs，不是静态网站，也不是旧 Worker。默认 npm start 与 npm run dev 均启动正式服务；npm run demo 仅保留本地状态机演示。
+
+建议发布目录 `/opt/voltgo/releases/<version>`，current 指向已验证版本；持久库在 `/var/lib/voltgo/production.sqlite`。服务使用专用低权限系统账户，数据库目录仅该账户可读写。环境配置不放 GitHub；不要在日志、截图或聊天中展示密钥。设置权限属于服务器维护操作，应由服务器管理员执行。
+
+## 3. 运行配置
+
+PUBLIC_ORIGIN=https://rental.example.com
+DATABASE_PATH=/var/lib/voltgo/production.sqlite
+HOST=127.0.0.1
+PORT=4173
+
+PUBLIC_ORIGIN 必须是裸 origin，不带路径、用户名、查询参数。Node 服务只在回环端口提供内部 HTTP，由 HTTPS 反向代理终止 TLS；Cookie 根据配置的外部 HTTPS 设置 Secure，不根据任意 Host/X-Forwarded-* 猜测 origin。反向代理应拒绝非指定 Host，不将应用内部端口暴露公网。提供有效匹配证书，不关闭证书校验。若暂时使用 HTTPS IP，证书需包含该 IP，Google 登录仍不可启用。
+
+本地开发可用 PUBLIC_ORIGIN=http://127.0.0.1:4173、ALLOW_LOCAL_HTTP=1，且只能绑定回环。此设置绝不可用于公网 HTTP。
+
+可由管理员创建 systemd 服务（示例，按实际路径和用户调整）：
+
+```ini
+[Unit]
+Description=voltgo rental service
+After=network.target
+[Service]
+Type=simple
+User=voltgo
+Group=voltgo
+WorkingDirectory=/opt/voltgo/current
+EnvironmentFile=/etc/voltgo/runtime.env
+ExecStart=/usr/bin/node /opt/voltgo/current/scripts/start.mjs
+Restart=on-failure
+UMask=0077
+NoNewPrivileges=true
+[Install]
+WantedBy=multi-user.target
+```
+
+不自动执行此配置，不自动重启现有服务。反向代理、证书、系统用户和服务权限由用户确认并部署。
+
+## 4. 独立管理员
+
+在可信服务器交互终端执行 DATABASE_PATH=... npm run admin -- create 用户名 owner。密码最少 14 字符，隐藏输入，scrypt N=32768/r=8/p=1，随机盐。用户名使用小写字母、数字、点、下划线、短横线。不会默认创建 admin/admin 等账号。
+
+其他角色 operator 可回复工单；viewer 只读。owner 可以维护站点和计价；管理员创建/停用/密码重设仅支持离线 CLI，暂无网页账号管理以免产生开放 bootstrap。
+
+重设：npm run admin -- reset-password 用户名
+停用：npm run admin -- disable 用户名
+
+两者撤销该管理员全部会话。CLI 要求 YES 确认，不将密码作为命令参数。保护服务器终端访问。登录有持久化限流、8 小时到期、退出撤销、CSRF 与 origin 校验；管理员和用户 Cookie 不互认。所有后台写入都由服务端校验角色并写审计。
+
+## 5. Google 后续配置
+
+用户在 Google Cloud 建立 Web application 类型 OAuth Client，完成 consent screen、应用名称、支持邮箱、必要隐私政策和测试用户/发布状态配置。需要保存 Client ID、Client Secret 和最终 HTTPS 域名。客户端密钥仅设置在服务器 GOOGLE_CLIENT_SECRET；无需发送在聊天或公开仓库。
+
+授权重定向 URI 必须精确登记 `https://rental.example.com/auth/google/callback`，应用配置 PUBLIC_ORIGIN 对应同一 origin。本实现为后端 OAuth redirect 流程，不使用浏览器内 Google JS SDK；回调地址必须无多余斜线/路径。公网裸 IP 不能用于 Google callback；localhost 是开发例外。
+
+服务使用 state、浏览器绑定 HttpOnly cookie、nonce、PKCE-S256、单次十分钟状态，验证 Google RS256 签名/JWKS、issuer、audience、expiry、azp 和 email_verified，以 Google sub 作为稳定身份。登录时不保存 access/refresh token，只保留登录身份和服务端会话。配置缺失/无效时明确不可用。配置完成后需人工验证真实成功/取消/过期流程，当前测试为隔离 mock provider 加真实本地 RSA 签名验证，并非真实 OAuth 联调。
+
+官方参考：https://developers.google.com/identity/openid-connect/openid-connect
+https://developers.google.com/identity/protocols/oauth2/web-server#uri-validation
+
+## 6. PVS / WsCharge
+
+仍为 pending。界面展示状态，但不存在一键启用或假成功；所有租出、扣款和归还命令返回不可用。待用户提供供应商协议、环境、认证/签名、事件去重、查询/退款/结算说明再开发真实适配器和验收。WsCharge 原始厂商资料不放公共仓库。现有离线 codec 不等于运行中的设备网关，也不依据65命令 ACK 开始计费。
+
+## 7. 备份、升级与回滚
+
+SQLite 处于 WAL 模式，运行中不能只复制主 .sqlite 文件。推荐使用 SQLite backup API 或在计划维护窗口停止应用后复制数据库及必要 WAL/SHM 一致性文件；优先用在线备份命令 `npm run backup -- /secure-backup/voltgo-YYYYMMDD.sqlite`。备份含个人数据与密码哈希，访问仅限授权维护人员，单独加密保存并定期做恢复演练。
+
+升级前备份数据库和当前版本配置，记录当前 Git 提交。新版本独立目录运行测试/构建，不覆盖数据；检查迁移说明后切换 current，再由管理员重启服务。启动 /health 返回 production 和 schemaVersion 1；检查独立管理员登录、匿名 API 401、退出失效、空/真实站点状态、Google pending、PVS/WsCharge pending。不要把旧测试支付导入真实账目。
+
+回滚代码前核实新旧数据库结构兼容；不能随意用旧备份覆盖已产生的业务数据。当前 schema v1 无旧 demo 数据迁移。恢复演练在隔离目录/端口，不要连接真实支付/机柜。
+
+## 8. 已知边界
+
+本版本的正式订单/支付只读列表为后续真实接入保留，尚无真实设备借还与计费服务，不可运营收款。当前 SQLite 单实例，无独立后台结算任务。审计为本地持久化记录，不是不可篡改外部审计。配置状态仅证明本地参数符合格式，不证明供应商可用。管理员未配置前登录不可能成功，这是预期行为。需完成上线安全审查、日志保留、隐私合规、备份、实际浏览器与真实供应商端到端验收。
