@@ -1,0 +1,12 @@
+.local/
+node_modules/
+dist/
+*.tar.gz
+.env*
+.sites-runtime/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.pem
+*.key
