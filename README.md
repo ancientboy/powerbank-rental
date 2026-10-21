@@ -7,7 +7,7 @@
 - 用户入口 `/`；管理入口 `/admin/login`，管理工作台 `/admin`。
 - 管理员通过服务器离线命令建立，不存在默认账户、默认密码或网页自助获取管理员入口。
 - 正式后台从空数据开始，支持站点/机柜映射、版本化计价、用户/订单/支付查看、支持工单、审计、接入状态。后台角色：owner、operator（工单操作）、viewer（只读）。
-- 用户仅保留真实 Google 登录接口；未配置时不可登录，不会生成模拟账户。Google 与管理员身份完全分离。
+- 用户保留真实 Google 登录接口，并提供默认关闭的临时 Google 测试登录。设置 ENABLE_GOOGLE_TEST_LOGIN=1 且两项 Google 配置为空时，可在同一服务进入隔离的 TEST 客户账户；不会获得管理员权限，也不启用支付/真机。详见部署指南第 9 节。
 - PVS、WsCharge 仅保留明确的未接入状态，不能扣款、租出、模拟归还或操作真实设备。订单/支付列表为空是正常状态，不显示假订单。
 - SQLite 由服务端共享，用户只能访问自己的订单/工单；正式数据与历史 demo.sqlite 不混用。
 - Apple 登录不在正式产品中。历史离线演示源码仅用于既有业务状态机回归，不得部署为正式服务。
@@ -46,6 +46,7 @@ DATABASE_PATH=/var/lib/voltgo/production.sqlite npm run admin -- create your-adm
 | HOST / PORT | 默认 `127.0.0.1:4173`，反向代理连接此地址 |
 | GOOGLE_CLIENT_ID | 后续 Google Web OAuth 客户端 ID |
 | GOOGLE_CLIENT_SECRET | 后续客户端密钥，仅存服务器，禁止提交仓库 |
+| ENABLE_GOOGLE_TEST_LOGIN | 默认 `0`；测试时明确设 `1`，任一 Google 配置非空即强制停用 |
 | ALLOW_LOCAL_HTTP | 仅开发回环测试可设 `1` |
 
 Google 回调固定为 `PUBLIC_ORIGIN/auth/google/callback`，例如 `https://rental.example.com/auth/google/callback`。现在可以全部留空，后台不依赖 Google。PVS/WsCharge 尚未实现真实适配器，不能靠设置任意凭据就启用。

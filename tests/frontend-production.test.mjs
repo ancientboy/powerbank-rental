@@ -55,3 +55,17 @@ test('support status uses accessible inline radio choices, never native popup se
   assert.equal(radios.length,3);assert.equal(radios.filter(node=>node.checked).length,1);assert.equal(radios.find(node=>node.checked).value,'in_progress');
   assert.ok(nodes.some(node=>node.tagName==='legend'&&node.textContent==='Request status'));assert.ok(!nodes.some(node=>node.tagName==='select'));
 });
+test('test login is explicit, uses challenge CSRF and renders test account restrictions', async () => {
+  const responses = { '/api/user/session': { user: null, readiness: { google: { ready: false }, googleTest: { ready: true } } }, '/api/user/stations': { stations: [] }, '/api/user/test-login-challenge': { csrf: 'test-challenge' }, '/api/user/test-login': { ok: true }, '/api/user/rentals': { rentals: [] }, '/api/user/support': { support: [] } };
+  const h = await harness('app.js', '/', responses);
+  const button = h.elements.get('account-content').children.find(n => n.textContent === 'Continue with Google (test)');
+  assert.ok(button); assert.match(text(h.elements.get('account-content')), /does not sign in to Google/);
+  responses['/api/user/session'] = { user: { id: 'test_customer', name: 'Test customer', isTest: true }, csrf: 'session-csrf', readiness: {} };
+  await button.events.click();
+  const req = h.requests.find(r => r.path === '/api/user/test-login');
+  assert.equal(req.options.headers['X-CSRF-Token'], 'test-challenge');
+  assert.equal(req.options.body, '{}');
+  assert.match(text(h.elements.get('account-content')), /TEST ACCOUNT/);
+  assert.match(text(h.elements.get('account-content')), /hardware actions are disabled/);
+  assert.ok(h.requests.some(r => r.path === '/api/user/support'));
+});

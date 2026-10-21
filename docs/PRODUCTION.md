@@ -4,7 +4,7 @@
 
 先确认旧应用目录、进程管理方式、反向代理和数据位置。不要覆盖 `.local/demo.sqlite`、旧 `.env`、上传文件或供应商资料，不要直接运行清库命令。旧演示账户不是已验证身份，不可转换为正式用户/管理员；旧支付不是财务记录，旧机柜不是实际库存。将旧数据保留在独立只读归档，不把它导入新生产库。
 
-本版本使用新文件 `production.sqlite` 和独立表结构；初次启动创建 schema_migrations version 1，重复启动不会清空数据。生产目录必须持久化，不能放在每次发布删除的临时目录。当前仅支持单个 Node 进程和单台主机 SQLite；不要开启 PM2 cluster 或多实例写同一文件。
+本版本使用新文件 `production.sqlite` 和独立表结构；初次启动创建 schema_migrations versions 1、2，重复启动不会清空数据。生产目录必须持久化，不能放在每次发布删除的临时目录。当前仅支持单个 Node 进程和单台主机 SQLite；不要开启 PM2 cluster 或多实例写同一文件。
 
 ## 2. 构建和文件布局
 
@@ -75,10 +75,26 @@ https://developers.google.com/identity/protocols/oauth2/web-server#uri-validatio
 
 SQLite 处于 WAL 模式，运行中不能只复制主 .sqlite 文件。推荐使用 SQLite backup API 或在计划维护窗口停止应用后复制数据库及必要 WAL/SHM 一致性文件；优先用在线备份命令 `npm run backup -- /secure-backup/voltgo-YYYYMMDD.sqlite`。备份含个人数据与密码哈希，访问仅限授权维护人员，单独加密保存并定期做恢复演练。
 
-升级前备份数据库和当前版本配置，记录当前 Git 提交。新版本独立目录运行测试/构建，不覆盖数据；检查迁移说明后切换 current，再由管理员重启服务。启动 /health 返回 production 和 schemaVersion 1；检查独立管理员登录、匿名 API 401、退出失效、空/真实站点状态、Google pending、PVS/WsCharge pending。不要把旧测试支付导入真实账目。
+升级前备份数据库和当前版本配置，记录当前 Git 提交。新版本独立目录运行测试/构建，不覆盖数据；检查迁移说明后切换 current，再由管理员重启服务。启动 /health 返回 production 和 schemaVersion 2；检查独立管理员登录、匿名 API 401、退出失效、空/真实站点状态、Google pending、PVS/WsCharge pending。不要把旧测试支付导入真实账目。
 
-回滚代码前核实新旧数据库结构兼容；不能随意用旧备份覆盖已产生的业务数据。当前 schema v1 无旧 demo 数据迁移。恢复演练在隔离目录/端口，不要连接真实支付/机柜。
+回滚代码前核实新旧数据库结构兼容；不能随意用旧备份覆盖已产生的业务数据。当前 schema v2 新增 test_users / test_login_states 两个独立表，不改变原有 users / admins / 业务记录。迁移可重复执行，不导入旧 demo 数据。恢复演练在隔离目录/端口，不要连接真实支付/机柜。
 
 ## 8. 已知边界
 
 本版本的正式订单/支付只读列表为后续真实接入保留，尚无真实设备借还与计费服务，不可运营收款。当前 SQLite 单实例，无独立后台结算任务。审计为本地持久化记录，不是不可篡改外部审计。配置状态仅证明本地参数符合格式，不证明供应商可用。管理员未配置前登录不可能成功，这是预期行为。需完成上线安全审查、日志保留、隐私合规、备份、实际浏览器与真实供应商端到端验收。
+
+
+## 9. 临时 Google 模拟登录（同一正式服务）
+
+默认关闭。此功能不调用 Google，不验证 Google 邮箱，只生成服务端测试客户身份；不是管理员入口，也不是切换回 legacy demo。仅在受控测试部署上临时开启，公网开启后任何访问者都可创建自己的测试客户与测试工单。不要在测试资料中填写个人敏感信息。
+
+1. 先备份 SQLite，更新代码并运行 npm test、npm run build；继续使用原来的 DATABASE_PATH。
+2. 在服务进程读取的环境配置中设置 ENABLE_GOOGLE_TEST_LOGIN=1，同时保持 GOOGLE_CLIENT_ID 和 GOOGLE_CLIENT_SECRET 都为空。不要把真实配置提交到仓库。项目不会自动读取 .env；使用现有 systemd EnvironmentFile 或启动时 node --env-file=/安全路径/应用.env scripts/start.mjs。
+3. 重启应用，打开用户首页 Your account，点击 Continue with Google (test)。无需邮箱、密码或 Google 授权。/api/user/session 中 readiness.googleTest.ready 应为 true，登录后 user.isTest 为 true。
+4. 可检查账户、空订单列表、创建测试工单及后台回复。账户与工单会写入正式共享 SQLite，但标为 TEST；不同浏览器互相隔离，管理员能看见这些测试数据。
+5. 同一浏览器退出再登录会恢复自己的测试账户。身份依据随机 HttpOnly cookie，不依据输入的邮箱、Google sub 或角色；清空 cookie、使用无痕窗口或浏览器绑定超过 30 天会获得新测试账户。保留 cookie 可在服务重启后继续访问原测试资料。退出撤销登录会话，但保留此测试身份绑定。
+6. 关闭时将 ENABLE_GOOGLE_TEST_LOGIN=0 并重启。服务会撤销测试会话与浏览器绑定，测试记录保留用于审计，不删除真实资料。即使以后再打开，也不会恢复已撤销的旧绑定。真实 Google 的任一配置项非空时，测试模式同样强制关闭，包括配置不完整或 IP 地址不支持 OAuth 的情况。正式启用 Google 时同时明确设回 0。
+
+测试用户与真实 Google 用户使用独立表及命名空间，不能自动合并、冒充真实 Google 账户或取得后台权限。真实 Google 登录后不会自动带入测试订单/工单。
+
+重要：模拟登录仅解决客户身份流程，不会启用真机借还或真实支付。本版租出、扣款、归还仍返回不可用；TEST 身份也不构成未来真实硬件/支付授权。后续 WsCharge 联调必须另行设计并授权测试账户白名单、测试机柜白名单和独立操作权限，不能仅凭 isTest 登录就打开生产机柜或扣款。PVS 继续预留，当前不发生真实收费。

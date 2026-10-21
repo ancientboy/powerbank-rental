@@ -6,7 +6,7 @@ import {
   recordAudit,
   transaction,
 } from "./production-store.mjs";
-import { readiness } from "./production-config.mjs";
+import { readiness, googleTestEnabled } from "./production-config.mjs";
 import {
   googleConfigured,
   beginGoogle,
@@ -27,6 +27,7 @@ const cookieNames = {
   admin: "voltgo_admin",
   user: "voltgo_user",
   oauth: "voltgo_oauth",
+  testBrowser: "voltgo_test_browser",
 };
 function cookies(request) {
   return Object.fromEntries(
@@ -47,6 +48,10 @@ export function createProductionAPI({
   now = Date.now,
   google = { beginGoogle, exchangeGoogle },
 }) {
+  if (!googleTestEnabled(config)) {
+    db.prepare("DELETE FROM sessions WHERE kind='user' AND subject IN (SELECT id FROM test_users)").run();
+    db.prepare("DELETE FROM test_login_states").run();
+  }
   const cookie = (kind, token, seconds) =>
     `${cookieNames[kind]}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${seconds}${config.secure ? "; Secure" : ""}`;
   function session(req, kind) {
@@ -58,13 +63,21 @@ export function createProductionAPI({
       )
       .get(digest(token), kind, now());
     if (!s) return null;
-    const user = db
+    let user = db
       .prepare(
         kind === "admin"
           ? "SELECT id,username,role FROM admins WHERE id=? AND disabled=0"
           : "SELECT id,email,name FROM users WHERE id=?",
       )
       .get(s.subject);
+    if (kind === "user") {
+      if (user) user = { ...user, provider: "google", isTest: false };
+      else if (googleTestEnabled(config)) {
+        const testUser = db.prepare("SELECT id,name FROM test_users WHERE id=?").get(s.subject);
+        if (testUser) user = { ...testUser, email: null, provider: "google_test", isTest: true,
+          capabilities: { payments: false, hardware: false } };
+      }
+    }
     return user ? { ...s, user } : null;
   }
   function requireSession(req, kind) {
@@ -125,6 +138,11 @@ export function createProductionAPI({
       if (u.origin !== config.publicOrigin)
         fail(400, "Invalid application origin");
       db.prepare("DELETE FROM sessions WHERE expires<=?").run(now());
+      db.prepare("DELETE FROM test_login_states WHERE expires<=?").run(now());
+      if (!googleTestEnabled(config)) {
+        db.prepare("DELETE FROM sessions WHERE kind='user' AND subject IN (SELECT id FROM test_users)").run();
+        db.prepare("DELETE FROM test_login_states").run();
+      }
       db.prepare("DELETE FROM oauth_states WHERE expires<=?").run(now());
       db.prepare("DELETE FROM rate_limits WHERE expires<=?").run(now());
       let body = {};
@@ -144,7 +162,7 @@ export function createProductionAPI({
           fail(400, "Invalid request");
       }
       if (path === "/health" && method === "GET")
-        return json({ status: "ok", mode: "production", schemaVersion: 1 });
+        return json({ status: "ok", mode: "production", schemaVersion: 2 });
       if (path === "/api/admin/login" && method === "POST") {
         const username = text(body.username, 100).toLowerCase();
         rate("admin-global", 60, 15 * 60000);
@@ -210,7 +228,7 @@ export function createProductionAPI({
             stations: listRecords(db, "station"),
             users: db
               .prepare(
-                "SELECT id,email,name,created_at FROM users ORDER BY created_at DESC LIMIT 1000",
+                "SELECT id,email,name,created_at,'google' AS provider,0 AS isTest FROM users UNION ALL SELECT id,NULL AS email,name,created_at,'google_test' AS provider,1 AS isTest FROM test_users ORDER BY created_at DESC LIMIT 1000",
               )
               .all(),
             rentals: listRecords(db, "rental"),
@@ -328,6 +346,47 @@ export function createProductionAPI({
           return json({ support: ticket });
         }
         fail(404, "Not found");
+      }
+      if (path === "/api/user/test-login-challenge" && method === "GET") {
+        if (!googleTestEnabled(config)) fail(404, "Test sign-in is disabled");
+        if ((req.headers.has("origin") && req.headers.get("origin") !== config.publicOrigin) ||
+            req.headers.get("sec-fetch-site") === "cross-site") fail(403, "Request verification failed");
+        rate("test-challenge-global", 100, 60000);
+        let token = cookies(req).voltgo_test_browser;
+        let binding = token && /^[\w-]{43}$/.test(token)
+          ? db.prepare("SELECT * FROM test_login_states WHERE browser_hash=? AND expires>?").get(digest(token), now()) : null;
+        const seconds = 30 * 86400;
+        if (!binding) {
+          token = random();
+          binding = { csrf: random() };
+          db.prepare("INSERT INTO test_login_states VALUES(?,?,?,NULL)").run(digest(token), binding.csrf, now() + seconds * 1000);
+        }
+        return json({ csrf: binding.csrf, testOnly: true }, 200, {
+          "Set-Cookie": cookie("testBrowser", token, seconds),
+        });
+      }
+      if (path === "/api/user/test-login" && method === "POST") {
+        if (!googleTestEnabled(config)) fail(404, "Test sign-in is disabled");
+        rate("test-login-global", 60, 15 * 60000);
+        if (Object.keys(body).length) fail(400, "Test sign-in does not accept identity or role fields");
+        const token = cookies(req).voltgo_test_browser;
+        const binding = token && /^[\w-]{43}$/.test(token)
+          ? db.prepare("SELECT * FROM test_login_states WHERE browser_hash=? AND expires>?").get(digest(token), now()) : null;
+        if (!binding) fail(403, "Request a new test sign-in challenge");
+        csrf(req, binding);
+        rate("test-login:" + digest(token), 10, 15 * 60000);
+        const issued = transaction(db, () => {
+          let id = binding.user_id;
+          if (!id) {
+            id = "test_" + randomUUID();
+            db.prepare("INSERT INTO test_users VALUES(?,?,?)").run(id, "Test customer", new Date(now()).toISOString());
+            db.prepare("UPDATE test_login_states SET user_id=? WHERE browser_hash=?").run(id, digest(token));
+          }
+          const issuedSession = newSession(req, "user", id);
+          recordAudit(db, id, "user.test_login", null, now());
+          return issuedSession;
+        });
+        return json({ ok: true, testOnly: true, csrf: issued.csrf }, 200, { "Set-Cookie": issued.header });
       }
       if (path === "/auth/google" && method === "GET") {
         if (!googleConfigured(config))
@@ -457,6 +516,7 @@ export function createProductionAPI({
           if (message.length < 5)
             fail(400, "Please describe the issue in at least five characters");
           const ticket = {
+            testOnly: s.user.isTest === true,
             id: randomUUID(),
             userId: s.subject,
             message,

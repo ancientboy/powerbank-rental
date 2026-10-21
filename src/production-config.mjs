@@ -26,9 +26,15 @@ export function loadConfig(env = process.env) {
     port: Number(env.PORT || 4173),
     googleClientId: env.GOOGLE_CLIENT_ID || "",
     googleClientSecret: env.GOOGLE_CLIENT_SECRET || "",
+    enableGoogleTestLogin: env.ENABLE_GOOGLE_TEST_LOGIN === "1",
     sessionSeconds: 28800,
     userSessionSeconds: 604800,
   };
+}
+// Fail closed even for partially configured OAuth, including unsupported IP origins.
+export function googleTestEnabled(config) {
+  return config.enableGoogleTestLogin === true &&
+    !config.googleClientId && !config.googleClientSecret;
 }
 export function readiness(config) {
   return {
@@ -37,6 +43,12 @@ export function readiness(config) {
       label: googleConfigured(config)
         ? "Configured; sign-in available"
         : "Awaiting Google OAuth configuration",
+    },
+    googleTest: {
+      ready: googleTestEnabled(config),
+      label: googleTestEnabled(config)
+        ? "Temporary test sign-in enabled; not Google authentication"
+        : "Test sign-in disabled",
     },
     pvs: { ready: false, label: "Integration pending; payments disabled" },
     wscharge: {

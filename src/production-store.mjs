@@ -55,6 +55,9 @@ export function openProductionStore(path) {
   CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, data TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT, created_at TEXT NOT NULL);
   INSERT OR IGNORE INTO schema_migrations VALUES(1,datetime('now'));`);
+  db.exec(`CREATE TABLE IF NOT EXISTS test_users(id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS test_login_states(browser_hash TEXT PRIMARY KEY, csrf TEXT NOT NULL, expires INTEGER NOT NULL, user_id TEXT REFERENCES test_users(id));
+  INSERT OR IGNORE INTO schema_migrations VALUES(2,datetime('now'));`);
   return db;
 }
 export function listRecords(db, kind, owner) {

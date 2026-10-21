@@ -27,9 +27,24 @@ function account() {
     container.append(el('h3', 'Welcome to your next charge.'), el('p', 'Sign in securely with your Google account.'));
     if (session.readiness?.google?.ready) { const link = el('a', 'Continue with Google', 'button dark'); link.href = '/auth/google'; container.append(link); }
     else container.append(el('div', 'Google sign-in is not configured yet', 'service-note'));
+    if (session.readiness?.googleTest?.ready) {
+      container.append(el('div', 'Test mode only. This does not sign in to Google. Test support messages are saved for administrators; do not enter personal information. Payments and hardware actions remain disabled.', 'service-note'));
+      const testLogin = el('button', 'Continue with Google (test)', 'button secondary');
+      testLogin.type = 'button';
+      testLogin.addEventListener('click', async () => {
+        testLogin.disabled = true; notice('');
+        try {
+          const challenge = await api('/api/user/test-login-challenge');
+          await api('/api/user/test-login', { method: 'POST', body: '{}', headers: { 'X-CSRF-Token': challenge.csrf } });
+          session = await api('/api/user/session'); account(); await memberData();
+        } catch (error) { notice(error.message); testLogin.disabled = false; }
+      });
+      container.append(testLogin);
+    }
     $('member-area').classList.add('hidden'); $('account-button').textContent = 'Your account';
   } else {
     container.append(el('span', 'YOU’RE SIGNED IN', 'eyebrow'), el('h3', session.user.name || 'Your account'), el('p', session.user.email || ''));
+    if (session.user.isTest) container.append(el('div', 'TEST ACCOUNT · Not a verified Google identity. Orders and support belong to this browser’s test account. Payments and hardware actions are disabled.', 'service-note'));
     const logout = el('button', 'Sign out', 'button secondary small'); logout.type = 'button'; logout.addEventListener('click', async () => { logout.disabled = true; try { await api('/api/user/logout', { method: 'POST', body: '{}' }); session = { ...session, user: null, csrf: null }; account(); $('rentals').replaceChildren(); $('support-history').replaceChildren(); } catch (error) { notice(error.message); logout.disabled = false; } }); container.append(logout);
     $('member-area').classList.remove('hidden'); $('account-button').textContent = session.user.name || 'Your account';
   }
