@@ -1,11 +1,11 @@
 // Deliberately self-contained simulation. No payment/hardware adapter or network imports.
 import { randomUUID, createHash } from 'node:crypto';
 import { transaction, recordAudit } from './production-store.mjs';
-export const testPricing = Object.freeze({ currency: 'ARS', hourlyRate: 10000, dailyCap: 60000, deposit: 0, version: 'test-v1', testOnly: true });
+export const testPricing = Object.freeze({ currency: 'ARS', hourlyRate: 50000, dailyCap: 300000, deposit: 1000000, version: 'test-deposit-v2', illustrative: true, testOnly: true });
 export const testStations = Object.freeze([{ id: 'DEMO-001', name: 'TEST · Demo station', address: 'Virtual station · no physical device', available: 8, testOnly: true }]);
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 export function testRentals(db, owner) {
-  return (owner === undefined ? db.prepare('SELECT data FROM test_rentals ORDER BY rowid DESC').all() : db.prepare('SELECT data FROM test_rentals WHERE owner_id=? ORDER BY rowid DESC').all(owner)).map(x => JSON.parse(x.data));
+  return (owner === undefined ? db.prepare('SELECT data FROM test_rentals ORDER BY rowid DESC').all() : db.prepare('SELECT data FROM test_rentals WHERE owner_id=? ORDER BY rowid DESC').all(owner)).map(x => { const r = JSON.parse(x.data); return { ...r, legacy: r.pricing?.version !== testPricing.version }; });
 }
 export function testPayments(db) {
   return db.prepare("SELECT data FROM test_records WHERE kind='payment' ORDER BY rowid DESC").all().map(x => JSON.parse(x.data));
@@ -24,9 +24,9 @@ export function handleTestRental({ db, subject, path, method, body, req, time })
   if (method === 'GET' && path === '/api/user/test/stations') return { testOnly: true, stations: testStations, pricing: testPricing };
   if (method === 'GET' && path === '/api/user/test/state') {
     const rentals = all();
-    return { testOnly: true, serverNow: iso, rental: rentals.find(r => ['pending_payment','active'].includes(r.status)) || null, rentals };
+    return { testOnly: true, serverNow: iso, rental: rentals.find(r => ['pending_payment','awaiting_pickup','active'].includes(r.status)) || null, rentals };
   }
-  if (method !== 'POST' || !['quote','rent','pay','cancel','return'].some(action => path === '/api/user/test/' + action)) fail(404, 'Not found');
+  if (method !== 'POST' || !['quote','rent','pay','pickup','cancel','return'].some(action => path === '/api/user/test/' + action)) fail(404, 'Not found');
   const key = req.headers.get('idempotency-key');
   if (!key || !/^[a-zA-Z0-9_-]{8,128}$/.test(key)) fail(400, 'Provide an Idempotency-Key (8–128 letters, numbers, _ or -)');
   const fingerprint = createHash('sha256').update(path + '\n' + JSON.stringify(body, Object.keys(body).sort())).digest('hex');
@@ -53,9 +53,10 @@ export function handleTestRental({ db, subject, path, method, body, req, time })
       const existing = testRentals(db, subject).find(r => r.quoteId === quote.id);
       if (existing) response = { rental: estimateTestRental(existing, time) };
       else {
+        if (quote.pricing?.version !== testPricing.version) fail(409, 'Legacy test quote. Request a new deposit quote.');
         if (Date.parse(quote.expiresAt) <= time) fail(409, 'Test quote expired. Scan the station again.');
-        if (all().some(r => ['pending_payment','active'].includes(r.status))) fail(409, 'Finish or cancel your current test rental first');
-        const rental = { id: 'test_rental_' + randomUUID(), userId: subject, quoteId: quote.id, stationId: quote.stationId, stationName: testStations[0].name, pricing: quote.pricing, currency: 'ARS', status: 'pending_payment', createdAt: iso, startedAt: null, returnedAt: null, durationSeconds: 0, totalAmount: 0, testOnly: true };
+        if (all().some(r => ['pending_payment','awaiting_pickup','active'].includes(r.status))) fail(409, 'Finish or cancel your current test rental first');
+        const rental = { id: 'test_rental_' + randomUUID(), userId: subject, quoteId: quote.id, stationId: quote.stationId, stationName: testStations[0].name, pricing: quote.pricing, currency: 'ARS', status: 'pending_payment', createdAt: iso, startedAt: null, returnedAt: null, durationSeconds: 0, totalAmount: 0, depositPaid: 0, depositApplied: 0, refundAmount: 0, outstandingAmount: 0, settlementStatus: 'unpaid', legacy: false, testOnly: true };
         db.prepare('INSERT INTO test_rentals VALUES(?,?,?,?,?)').run(rental.id, subject, rental.status, quote.id, JSON.stringify(rental));
         recordAudit(db, subject, 'test.rental.create', rental.id, time); response = { rental };
       }
@@ -66,27 +67,77 @@ export function handleTestRental({ db, subject, path, method, body, req, time })
         const value = { id: 'test_payment_' + randomUUID(), rentalId: rental.id, userId: subject, type, status, amount, currency: 'ARS', provider: 'mock', createdAt: iso, testOnly: true };
         put('payment', value); return value;
       };
+      // These are ledger entries for a simulation, never provider calls or wallet credits.
+      const finish = (cancelled = false) => {
+        const paid = rental.legacy ? 0 : (rental.depositPaid || 0);
+        rental.depositApplied = Math.min(paid, rental.totalAmount);
+        rental.refundAmount = Math.max(0, paid - rental.depositApplied);
+        rental.outstandingAmount = Math.max(0, rental.totalAmount - paid);
+        rental.settlementStatus = rental.legacy ? 'legacy_review' : rental.outstandingAmount ? 'review_required' : 'settled';
+        let fee = null, refund = null;
+        if (!cancelled) {
+          fee = payment('rental_fee', rental.legacy ? 'review_required' : 'deducted', rental.depositApplied);
+          fee.feeAmount = rental.totalAmount; fee.source = 'deposit';
+          db.prepare("UPDATE test_records SET data=? WHERE kind='payment' AND id=?").run(JSON.stringify(fee), fee.id);
+          rental.settlementId = fee.id;
+        }
+        if (rental.refundAmount > 0) {
+          refund = payment('refund', 'succeeded', rental.refundAmount);
+          rental.refundId = refund.id;
+        }
+        return { payment: fee, refund };
+      };
+      const receipt = () => ({ rental: estimateTestRental(rental, time), payment: getRecord('payment', rental.settlementId || rental.depositPaymentId || rental.authorizationId), refund: getRecord('payment', rental.refundId) });
       if (path.endsWith('/pay')) {
         if (!['success','failure'].includes(body.outcome)) fail(400, 'Choose success or failure for the simulated payment');
-        if (rental.status === 'active' || rental.status === 'completed') response = { rental: estimateTestRental(rental, time), payment: getRecord('payment', rental.authorizationId) };
+        const method = body.paymentMethod || 'card';
+        if (!['card','google_pay','bank_transfer'].includes(method)) fail(400, 'Choose a supported mock payment method');
+        if (rental.legacy) fail(409, 'Legacy zero-deposit rental. Cancel and start again for the deposit flow; return an active legacy rental first.');
+        if (rental.depositPaymentId) response = { rental: estimateTestRental(rental, time), payment: getRecord('payment', rental.depositPaymentId) };
         else {
           if (rental.status !== 'pending_payment') fail(409, 'Cancelled rentals cannot be paid');
-          const p = payment('authorization', body.outcome === 'success' ? 'authorized' : 'failed', 0);
-          if (body.outcome === 'success') { rental.status = 'active'; rental.startedAt = iso; rental.authorizationId = p.id; }
-          save(rental); response = { rental: estimateTestRental(rental, time), payment: p };
+          const p = payment('deposit', body.outcome === 'success' ? 'succeeded' : 'failed', rental.pricing.deposit);
+          p.paymentMethod = method;
+          db.prepare("UPDATE test_records SET data=? WHERE kind='payment' AND id=?").run(JSON.stringify(p), p.id);
+          if (body.outcome === 'success') {
+            rental.paymentMethod = method;
+            rental.status = 'awaiting_pickup'; rental.depositPaymentId = p.id;
+            rental.depositPaid = p.amount; rental.paidAt = iso; rental.settlementStatus = 'deposit_held';
+          }
+          save(rental); response = { rental, payment: p };
           recordAudit(db, subject, 'test.payment.' + body.outcome, rental.id, time);
         }
+      } else if (path.endsWith('/pickup')) {
+        if (!['success','failure'].includes(body.outcome)) fail(400, 'Choose success or failure for the simulated pickup');
+        if (rental.legacy) fail(409, 'Legacy rental has no deposit pickup flow');
+        if (rental.pickupOutcome) response = receipt();
+        else {
+          if (rental.status !== 'awaiting_pickup') fail(409, 'Pay the simulated deposit before pickup');
+          rental.pickupOutcome = body.outcome;
+          if (body.outcome === 'success') {
+            rental.status = 'active'; rental.startedAt = iso;
+            response = { rental: estimateTestRental(rental, time) };
+          } else {
+            rental.status = 'cancelled'; rental.cancelledAt = iso; rental.cancellationReason = 'pickup_failed';
+            response = { rental, ...finish(true) };
+          }
+          save(rental); recordAudit(db, subject, 'test.pickup.' + body.outcome, rental.id, time);
+        }
       } else if (path.endsWith('/cancel')) {
-        if (!['pending_payment','cancelled'].includes(rental.status)) fail(409, 'An active test rental must be returned, not cancelled');
-        rental.status = 'cancelled'; rental.cancelledAt ||= iso; save(rental); response = { rental };
+        if (!['pending_payment','awaiting_pickup','cancelled'].includes(rental.status)) fail(409, 'An active test rental must be returned, not cancelled');
+        if (rental.status === 'cancelled') response = receipt();
+        else {
+          rental.status = 'cancelled'; rental.cancelledAt = iso;
+          response = { rental, ...finish(true) }; save(rental);
+          recordAudit(db, subject, 'test.rental.cancel', rental.id, time);
+        }
       } else {
-        if (rental.status === 'completed') response = { rental, payment: getRecord('payment', rental.settlementId) };
+        if (rental.status === 'completed') response = receipt();
         else {
           if (rental.status !== 'active') fail(409, 'Only an active test rental can be returned');
           Object.assign(rental, estimateTestRental(rental, time));
           rental.status = 'completed'; rental.returnedAt = iso;
-          const p = payment('settlement', 'succeeded', rental.totalAmount);
-          rental.settlementId = p.id; save(rental); response = { rental, payment: p };
+          response = { rental, ...finish() }; save(rental);
           recordAudit(db, subject, 'test.rental.return', rental.id, time);
         }
       }

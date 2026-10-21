@@ -75,3 +75,15 @@ test('overview counts exclude mock orders, payments, users and support', async (
   assert.deepEqual(stats.children.map(card => card.children[1].textContent), ['0', '0', '0', '0']);
   assert.doesNotMatch(text(stats), /Recorded rentals|Registered locations|Customer accounts/);
 });
+
+
+test('test deposit and refund transactions have distinct labels', async () => {
+  const h = await admin({ payments: [], testPayments: [
+    { id: 'deposit-demo', rentalId: 'r-demo', type: 'deposit', amount: 1000000, currency: 'ARS', status: 'succeeded', testOnly: true },
+    { id: 'refund-demo', rentalId: 'r-demo', type: 'refund', amount: 950000, currency: 'ARS', status: 'succeeded', testOnly: true }
+  ] });
+  const output = h.render('payments');
+  assert.match(output, /Type/);
+  assert.match(output, /deposit-demo.*Deposit/);
+  assert.match(output, /refund-demo.*Refund/);
+});

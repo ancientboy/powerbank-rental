@@ -21,10 +21,10 @@ async function setup() {
 }
 test('TEST pricing uses integer cents, started hours, daily cap and server clock', () => {
   const r = { status: 'active', startedAt: new Date(0).toISOString(), pricing: { ...testPricing } };
-  for (const [ms, amount] of [[0,10000],[3600000,10000],[3600001,20000],[7*3600000,60000],[24*3600000,60000],[24*3600000+1,70000],[48*3600000,120000]]) {
+  for (const [ms, amount] of [[0,50000],[3600000,50000],[3600001,100000],[7*3600000,300000],[24*3600000,300000],[24*3600000+1,350000],[48*3600000,600000]]) {
     assert.equal(estimateTestRental(r, ms).totalAmount, amount);
   }
-  assert.equal(estimateTestRental(r, -1).totalAmount, 10000);
+  assert.equal(estimateTestRental(r, -1).totalAmount, 50000);
 });
 test('TEST quotes, open-rental uniqueness and idempotency reject conflicts', async t => {
   const s = await setup(); t.after(() => s.db.close());
@@ -52,8 +52,11 @@ test('TEST failed payment retries, duplicate success/return, immutable settlemen
   await s.call('pay', { rentalId, outcome: 'failure' }, failKey);
   assert.equal(s.db.prepare("SELECT count(*) n FROM test_records WHERE kind='payment'").get().n,1);
   const paid = await s.call('pay', { rentalId, outcome: 'success', totalAmount: 1, startedAt: '1900-01-01' });
-  assert.equal(paid.data.rental.status,'active');
-  assert.equal(paid.data.rental.totalAmount,10000);
+  assert.equal(paid.data.rental.status,'awaiting_pickup');
+  assert.equal(paid.data.rental.startedAt,null);
+  assert.equal(paid.data.rental.depositPaid,1000000);
+  assert.equal(paid.data.rental.totalAmount,0);
+  assert.equal((await s.call('pickup', { rentalId, outcome:'success' })).status,200);
   assert.equal((await s.call('pay', { rentalId, outcome: 'success' })).data.payment.id,paid.data.payment.id);
   assert.equal((await s.call('cancel', { rentalId })).status,409);
   s.advance(3600001);
@@ -61,10 +64,10 @@ test('TEST failed payment retries, duplicate success/return, immutable settlemen
   s.db.prepare('UPDATE sessions SET expires=expires+10000000').run();
   const returned = await s.call('return', { rentalId, totalAmount: 1 });
   assert.equal(returned.data.rental.status,'completed');
-  assert.equal(returned.data.payment.amount,20000);
+  assert.equal(returned.data.payment.amount,100000);
   s.advance(100000);
   assert.deepEqual((await s.call('return', { rentalId })).data.rental,returned.data.rental);
-  assert.equal(s.db.prepare("SELECT count(*) n FROM test_records WHERE kind='payment'").get().n,3);
+  assert.equal(s.db.prepare("SELECT count(*) n FROM test_records WHERE kind='payment'").get().n,4);
   const q2 = await s.call('quote', { stationId: 'DEMO-001' });
   const r2 = await s.call('rent', { quoteId: q2.data.quote.id });
   const cancelled = await s.call('cancel', { rentalId: r2.data.rental.id });
@@ -79,4 +82,20 @@ test('TEST quote expires and no-network simulation module stays isolated', async
   const q = await s.call('quote', { stationId:'DEMO-001' });
   s.advance(300000);
   assert.equal((await s.call('rent', { quoteId: q.data.quote.id })).status,409);
+});
+
+test('TEST mock payment methods are validated and persisted without external payment calls', async t => {
+  const s = await setup(); t.after(() => s.db.close());
+  for (const paymentMethod of ['card','google_pay','bank_transfer']) {
+    const q = await s.call('quote', { stationId:'DEMO-001' });
+    const r = await s.call('rent', { quoteId:q.data.quote.id });
+    const rentalId = r.data.rental.id;
+    assert.equal((await s.call('pay', { rentalId, outcome:'success', paymentMethod:'unknown' })).status,400);
+    const paid = await s.call('pay', { rentalId, outcome:'success', paymentMethod });
+    assert.equal(paid.data.payment.paymentMethod,paymentMethod);
+    assert.equal(paid.data.rental.paymentMethod,paymentMethod);
+    const cancelled = await s.call('cancel', { rentalId });
+    assert.equal(cancelled.data.refund.amount,1000000);
+    assert.equal(cancelled.data.rental.totalAmount,0);
+  }
 });

@@ -63,6 +63,17 @@ export function openProductionStore(path) {
   CREATE UNIQUE INDEX IF NOT EXISTS test_one_open_rental ON test_rentals(owner_id) WHERE status IN ('pending_payment','active');
   CREATE TABLE IF NOT EXISTS test_idempotency(owner_id TEXT NOT NULL REFERENCES test_users(id), key TEXT NOT NULL, fingerprint TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(owner_id,key));
   INSERT OR IGNORE INTO schema_migrations VALUES(3,datetime('now'));`);
+  if (!db.prepare('SELECT version FROM schema_migrations WHERE version=4').get()) {
+    transaction(db, () => {
+      db.exec(`DROP INDEX IF EXISTS test_one_open_rental;
+        ALTER TABLE test_rentals RENAME TO test_rentals_v3;
+        CREATE TABLE test_rentals(id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES test_users(id), status TEXT NOT NULL CHECK(status IN ('pending_payment','awaiting_pickup','active','completed','cancelled')), quote_id TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
+        INSERT INTO test_rentals SELECT * FROM test_rentals_v3;
+        DROP TABLE test_rentals_v3;
+        CREATE UNIQUE INDEX test_one_open_rental ON test_rentals(owner_id) WHERE status IN ('pending_payment','awaiting_pickup','active');
+        INSERT INTO schema_migrations VALUES(4,datetime('now'));`);
+    });
+  }
   return db;
 }
 export function listRecords(db, kind, owner) {

@@ -3,7 +3,7 @@ const $ = (id) => document.getElementById(id);
 let session = { user: null, readiness: {} };
 let testState = null, quote = null, busy = false, clockOffset = 0, cameraStream = null, cameraTimer = null, sheetOpener = null;
 const operationKeys = new Map();
-let navigationVersion = 0, afterLogin = 'home';
+let navigationVersion = 0, afterLogin = 'home', scanAfterLogin = false, paymentMethod = 'card';
 let view = 'home', stationData = { stations: [], pricing: null };
 const screens = { home: 'home-screen', stations: 'stations', history: 'member-area', profile: 'account', support: 'support-screen', scan: 'rental-home' };
 const navigation = { 'brand-home': 'home', 'desktop-home': 'home', 'desktop-stations': 'stations', 'desktop-history': 'history', 'desktop-support': 'support', 'mobile-home': 'home', 'mobile-stations': 'stations', 'mobile-history': 'history', 'mobile-profile': 'profile', 'profile-history': 'history', 'profile-stations': 'stations', 'profile-support': 'support', 'home-stations': 'stations', 'footer-help': 'support', 'rental-back': 'home' };
@@ -26,9 +26,13 @@ function navigate(next, updateHash = true) {
   if (updateHash) window.scrollTo?.({ top: 0, behavior: 'instant' });
   if (view === 'stations') renderStations();
 }
-function startRental() { navigate('scan'); }
+function startRental() {
+  if (!session.user?.isTest) { scanAfterLogin = true; navigate('scan'); return; }
+  navigate('scan');
+  if (!testState?.rental && !quote) return startCamera();
+}
 function refreshHome() {
-  $('home-scan-label').textContent = testState?.rental ? 'View current rental' : 'Scan to rent';
+  $('home-scan-label').textContent = testState?.rental ? 'View current rental' : quote ? 'Continue rental' : 'Scan to rent';
   const first = stationData.stations?.[0], summary = $('home-station'); summary.replaceChildren();
   if (first) summary.append(el('strong', first.name, 'home-station-name'), el('p', first.address || 'Address coming soon'), el('p', session.user?.isTest ? `${first.available ?? 0} ready for a test rental · No physical device` : 'Real rentals are not yet available.'));
   else summary.append(el('p', 'No stations available yet.'));
@@ -82,7 +86,7 @@ function account() {
         try {
           const challenge = await api('/api/user/test-login-challenge');
           await api('/api/user/test-login', { method: 'POST', body: '{}', headers: { 'X-CSRF-Token': challenge.csrf } });
-          session = await api('/api/user/session'); account(); if (navigationVersion === loginNavigation) navigate(afterLogin); afterLogin = 'home'; const landedNavigation = navigationVersion; await memberData(); await stations(); if (navigationVersion === landedNavigation && view === 'home' && testState?.rental) navigate('scan');
+          session = await api('/api/user/session'); account(); if (navigationVersion === loginNavigation) navigate(afterLogin); afterLogin = 'home'; const landedNavigation = navigationVersion; await memberData(); await stations(); if (navigationVersion === landedNavigation && view === 'home' && testState?.rental) navigate('scan'); if (navigationVersion === landedNavigation && view === 'scan' && scanAfterLogin && !testState?.rental && !quote) { scanAfterLogin = false; await startCamera(); } else scanAfterLogin = false;
         } catch (error) { notice(error.message); testLogin.disabled = false; }
       });
       container.append(testLogin);
@@ -140,10 +144,12 @@ async function transact(kind, body) {
     const result = await mutate(kind, body);
     quote = null;
     if (kind === 'pay' && body.outcome === 'failure') notice('Test payment failed. Retry or cancel below. No money was charged.');
-    if (kind === 'return') notice(`Test return complete. Settled: ${money(result.rental.totalAmount, result.rental.pricing?.currency)}. No real charge.`);
-    if (kind === 'cancel') notice('Test rental canceled. No charge.');
+    if (kind === 'return') notice(`Test return complete. Rental fee: ${money(result.rental.totalAmount, result.rental.pricing?.currency)}. No real charge.`);
+    if (kind === 'pay' && body.outcome === 'success') notice('Test deposit paid. Waiting for simulated pickup. The rental clock has not started.');
+    if (kind === 'pickup') notice(body.outcome === 'success' ? 'Simulated pickup confirmed. Your rental clock has started.' : 'Simulated pickup failed. Your full test deposit was refunded.');
+    if (kind === 'cancel') notice(result.rental.depositPaid > 0 ? 'Test rental canceled. Your full test deposit was refunded.' : 'Test rental canceled. No charge.');
     await loadTestState();
-    if (kind === 'return' && navigationVersion === startedNavigation) showReceipt(result.rental);
+    if ((kind === 'return' || (['cancel', 'pickup'].includes(kind) && result.rental.depositPaid > 0 && result.rental.status === 'cancelled')) && navigationVersion === startedNavigation) showReceipt(result.rental);
   } catch (error) { showFlowError(error); await loadTestState(); }
   finally { busy = false; renderFlow(); }
 }
@@ -163,11 +169,12 @@ function priceSummary(pricing) {
   return card;
 }
 function renderFlow() {
+  refreshHome();
   if (!session.user?.isTest) return;
   const root = $('rental-flow'); root.replaceChildren();
   const rental = testState?.rental;
   const heading = el('div', null, 'rental-page-heading');
-  const title = rental?.status === 'active' ? 'You’re all charged up.' : rental?.status === 'pending_payment' ? 'Pick your way to pay.' : quote ? 'Your next charge.' : 'A quick scan. A full day ahead.';
+  const title = rental?.status === 'active' ? 'You’re all charged up.' : rental?.status === 'awaiting_pickup' ? 'Ready when you are.' : rental?.status === 'pending_payment' ? 'Pick your way to pay.' : quote ? 'Your next charge.' : 'A quick scan. A full day ahead.';
   heading.append(el('h1', title), el('p', rental?.status === 'active' ? 'A little power. Wherever your day takes you.' : 'Test experience. No real payment or device.')); root.append(heading);
   const card = el('div', null, 'card rental-card'); root.append(card);
   if (rental?.status === 'active') {
@@ -176,16 +183,37 @@ function renderFlow() {
     const stats = el('div', null, 'rental-stats');
     for (const [label, id] of [['Duration', 'active-duration'], ['Estimated test total', 'active-cost']]) { const stat = el('div'); const value = el('strong', '…'); value.id = id; stat.append(el('span', label), value); stats.append(stat); }
     const battery = el('div', 'ϟ', 'battery-illustration rental-active-art'); card.append(battery);
-    card.append(stats, priceSummary(rental.pricing), el('p', 'Clock starts after test payment. No physical power bank is released.', 'subtle'), action('Return demo power bank', () => confirmReturn(rental)));
+    card.append(stats, priceSummary(rental.pricing), el('p', rental.legacy ? 'Legacy test rental: original rates preserved. No deposit was collected.' : 'Clock started at confirmed pickup. The rental fee is deducted from your test deposit on return.', 'subtle'), action('Return demo power bank', () => confirmReturn(rental)));
     card.append(action('Find a return station', () => navigate('stations'), 'secondary')); updateClock(); return;
   }
-  if (rental?.status === 'pending_payment') {
-    card.append(el('span', 'TEST CHECKOUT', 'eyebrow'), el('h2', 'Choose a test payment'), priceSummary(rental.pricing), el('p', 'No card required. Test authorization: ARS 0.00. Test total settles on return.'));
+  if (rental?.status === 'awaiting_pickup') {
+    card.append(el('span', 'TEST DEPOSIT PAID', 'eyebrow'), el('h2', 'Waiting for pickup'), el('p', `Test deposit: ${money(rental.depositPaid, rental.pricing.currency)}. The rental clock has not started.`), el('p', 'No real hardware is connected. Confirm simulated pickup to start billing, or cancel for a full test deposit refund.', 'subtle'));
     const buttons = el('div', null, 'flow-actions');
-    buttons.append(action('Test payment success / retry', () => transact('pay', { rentalId: rental.id, outcome: 'success' })), action('Test payment failure', () => transact('pay', { rentalId: rental.id, outcome: 'failure' }), 'secondary'), action('Cancel rental', () => transact('cancel', { rentalId: rental.id }), 'secondary')); card.append(buttons); return;
+    buttons.append(action('Simulate pickup', () => transact('pickup', { rentalId: rental.id, outcome: 'success' })), action('Simulate pickup failure', () => transact('pickup', { rentalId: rental.id, outcome: 'failure' }), 'secondary'), action('Cancel and refund deposit', () => transact('cancel', { rentalId: rental.id }), 'secondary')); card.append(buttons); return;
+  }
+  if (rental?.status === 'pending_payment') {
+    card.append(el('span', 'TEST CHECKOUT', 'eyebrow'), el('h2', 'Choose a test payment'), priceSummary(rental.pricing));
+    if (rental.legacy) {
+      card.append(el('p', 'This older zero-deposit quote is no longer payable. Cancel it and scan again to review the current test deposit and rates.'), action('Cancel old quote', () => transact('cancel', { rentalId: rental.id }))); return;
+    }
+    card.append(el('p', 'Pay a refundable test deposit for this rental only. Billing starts after simulated pickup. On return, the fee is deducted and the remainder refunded. No real payment details are collected. If payment fails, use Pay test deposit to retry.'));
+    const methods = el('fieldset'); methods.style.border = '0'; methods.style.padding = '0'; methods.style.margin = '0'; methods.append(el('legend', 'Test payment method')); methods.setAttribute('role', 'radiogroup');
+    const choices = [];
+    for (const [value, title] of [['card', 'Debit / credit card'], ['google_pay', 'Google Pay'], ['bank_transfer', 'Bank transfer']]) {
+      const option = el('button', null, 'payment-option'); option.type = 'button'; option.disabled = busy; option.setAttribute('role', 'radio');
+      const copy = el('span', null, 'grow'); copy.append(el('strong', title), el('span', 'Mock payment only', 'small muted'));
+      const radio = el('span', null, 'radio'); radio.setAttribute('aria-hidden', 'true'); option.append(copy, radio);
+      const select = () => { paymentMethod = value; for (const [button, key] of choices) { button.classList.toggle('selected', key === value); button.setAttribute('aria-checked', String(key === value)); button.tabIndex = key === value ? 0 : -1; } };
+      option.addEventListener('click', select);
+      option.addEventListener('keydown', event => { if (['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(event.key)) { event.preventDefault(); const index = choices.findIndex(([button]) => button === option); const target = choices[(index + (['ArrowRight', 'ArrowDown'].includes(event.key) ? 1 : choices.length - 1)) % choices.length][0]; target.click(); target.focus(); } });
+      choices.push([option, value]); option.classList.toggle('selected', value === paymentMethod); option.setAttribute('aria-checked', String(value === paymentMethod)); option.tabIndex = value === paymentMethod ? 0 : -1; methods.append(option);
+    }
+    card.append(methods, el('p', 'Simulated methods only. No provider, bank or card is contacted.', 'subtle'));
+    const buttons = el('div', null, 'flow-actions');
+    buttons.append(action(`Pay test deposit · ${money(rental.pricing.deposit, rental.pricing.currency)}`, () => transact('pay', { rentalId: rental.id, outcome: 'success', paymentMethod })), action('Simulate payment failure', () => transact('pay', { rentalId: rental.id, outcome: 'failure', paymentMethod }), 'secondary'), action('Cancel rental', () => transact('cancel', { rentalId: rental.id }), 'secondary')); card.append(buttons); return;
   }
   if (quote) {
-    card.append(el('span', 'DEMO-001 · TEST QUOTE', 'eyebrow'), el('h2', 'Review your rental'), priceSummary(quote.pricing), el('p', 'Test prices only. Billed per started hour, with a one-hour minimum and a cap per 24 hours.', 'subtle'));
+    card.append(el('span', 'DEMO-001 · TEST QUOTE', 'eyebrow'), el('h2', 'Review your rental'), priceSummary(quote.pricing), el('p', 'Illustrative test prices only. Pay the deposit before pickup. Billed from confirmed pickup per started hour, with a one-hour minimum and a cap per 24 hours. The fee is deducted on return; the remainder is refunded.', 'subtle'));
     const buttons = el('div', null, 'flow-actions');
     buttons.append(action('Continue to test payment', () => transact('rent', { quoteId: quote.id })), action('Back', () => { quote = null; renderFlow(); }, 'secondary')); card.append(buttons); return;
   }
@@ -213,9 +241,10 @@ function renderHistory(rows) {
   if (!rows.length) { list.append(empty('No rentals yet', 'Your test rentals will appear here.')); return; }
   for (const rental of rows) {
     const row = el('article', null, 'history-row');
-    row.append(el('span', 'TEST', 'badge'), el('strong', rental.stationName || rental.stationId || 'Demo station'), el('span', { pending_payment: 'Awaiting test payment', active: 'Active', completed: 'Returned · settled', canceled: 'Canceled', cancelled: 'Canceled' }[rental.status] || rental.status));
-    if (['active', 'pending_payment'].includes(rental.status)) row.append(action('View current rental', () => navigate('scan'), 'secondary small'));
-    if (rental.status === 'completed') row.append(el('strong', money(rental.totalAmount, rental.pricing?.currency)), action('View receipt', () => showReceipt(rental), 'secondary small'));
+    row.append(el('span', 'TEST', 'badge'), el('strong', rental.stationName || rental.stationId || 'Demo station'), el('span', { pending_payment: 'Awaiting test deposit', awaiting_pickup: 'Deposit paid · awaiting pickup', active: 'Active', completed: ['review_required', 'legacy_review'].includes(rental.settlementStatus) ? 'Returned · review required' : 'Returned · settled', canceled: 'Canceled', cancelled: 'Canceled' }[rental.status] || rental.status));
+    if (['active', 'pending_payment', 'awaiting_pickup'].includes(rental.status)) row.append(action('View current rental', () => navigate('scan'), 'secondary small'));
+    if (rental.depositPaid > 0) row.append(el('span', `Test deposit: ${money(rental.depositPaid, rental.pricing?.currency)}`));
+    if (rental.status === 'completed' || rental.status === 'cancelled') { row.append(el('strong', `Rental fee: ${money(rental.totalAmount, rental.pricing?.currency)}`), el('span', rental.legacy ? 'Legacy rental · no deposit collected' : `Test refund: ${money(rental.refundAmount || 0, rental.pricing?.currency)} · ${settlementLabel(rental)}`), action('View receipt', () => showReceipt(rental), 'secondary small')); }
     if (rental.createdAt) row.append(el('span', new Date(rental.createdAt).toLocaleString(), 'subtle')); list.append(row);
   }
 }
@@ -241,28 +270,42 @@ function openSheet(title) {
   $('sheet-root').append(overlay); $('customer-shell').inert = true; $('main-content').inert = true;
   if (document.body) document.body.style.overflow = 'hidden'; sheet.focus(); return sheet;
 }
+function settlementLabel(rental) {
+  return ({ unpaid: 'Not paid', deposit_held: 'Deposit held until return', settled: rental.refundAmount > 0 ? (rental.refundId ? 'Refund completed · TEST' : 'Refund confirmation pending · TEST') : 'Settled · no refund due', review_required: 'Additional amount due · not charged', legacy_review: 'Legacy · no deposit collected' })[rental.settlementStatus] || 'Not due';
+}
 function showReceipt(rental) {
   const sheet = openSheet('Test rental receipt');
   const seconds = rental.durationSeconds || 0;
-  sheet.append(el('span', 'SETTLED · NO REAL CHARGE', 'badge'), el('p', rental.stationName || 'Demo station'));
+  sheet.append(el('span', ['review_required', 'legacy_review'].includes(rental.settlementStatus) ? 'REVIEW REQUIRED · NO REAL CHARGE' : 'TEST RECEIPT · NO REAL CHARGE', 'badge'), el('p', rental.stationName || 'Demo station'));
   const details = el('div', null, 'price-summary');
   for (const [label, value] of [
     ['Started', rental.startedAt ? new Date(rental.startedAt).toLocaleString() : '—'],
     ['Returned', rental.returnedAt ? new Date(rental.returnedAt).toLocaleString() : '—'],
     ['Duration', `${Math.floor(seconds / 3600)}h ${Math.floor(seconds / 60) % 60}m ${seconds % 60}s`],
-    ['Test total', money(rental.totalAmount, rental.pricing?.currency)],
+    ['Test payment method', ({ card: 'Debit / credit card · mock', google_pay: 'Google Pay · mock', bank_transfer: 'Bank transfer · mock' })[rental.paymentMethod] || 'Mock payment'],
+    ['Test deposit paid', money(rental.depositPaid || 0, rental.pricing?.currency)],
+    ['Rental fee', money(rental.totalAmount, rental.pricing?.currency)],
+    ['Deducted from deposit', money(rental.depositApplied || 0, rental.pricing?.currency)],
+    ['Test deposit refund', money(rental.refundAmount || 0, rental.pricing?.currency)],
+    ['Refund / settlement status', rental.legacy ? 'Legacy · no deposit collected' : settlementLabel(rental)],
+    ...(rental.outstandingAmount > 0 ? [['Balance due', money(rental.outstandingAmount, rental.pricing?.currency)]] : []),
     ['Real charge', money(0, rental.pricing?.currency)]
   ]) { const row = el('div'); row.append(el('span', label), el('strong', value)); details.append(row); }
-  sheet.append(details, el('p', 'Mock payment settled. No physical return or real payment occurred.', 'subtle'));
+  sheet.append(details, el('p', rental.legacy ? 'Legacy test rental: original rates preserved. No deposit was collected or refunded, and no additional payment was charged.' : 'Mock settlement only. No physical return or real payment occurred.', 'subtle'));
 }
 function confirmReturn(rental) {
   const sheet = openSheet('Return demo power bank?');
-  sheet.append(el('p', 'This ends your test rental and settles the test total. No real charge.'), action('Confirm test return', () => { closeSheet(); transact('return', { rentalId: rental.id }); }));
+  sheet.append(el('p', rental.legacy ? 'End this legacy test rental at its original rates. No deposit was collected and no real charge will occur.' : 'End your test rental, deduct the rental fee from your test deposit and refund the remainder. Any fee above the deposit will be shown separately. No real charge.'), action('Confirm test return', () => { closeSheet(); transact('return', { rentalId: rental.id }); }));
 }
 async function startCamera() {
   if (!globalThis.BarcodeDetector || !globalThis.navigator?.mediaDevices?.getUserMedia) { notice('Camera scanning is unavailable in this browser. Enter DEMO-001 or use Mock scan.'); return; }
   const sheet = openSheet('Scan a demo QR code');
   const hint = el('p', 'Allow camera access to scan. Only DEMO-001 is supported.'); const video = el('video'); video.autoplay = true; video.muted = true; video.playsInline = true; sheet.append(hint, video);
+  sheet.append(action('Mock scan · DEMO-001', () => requestQuote('DEMO-001'), 'secondary'));
+  const manual = el('form'), label = el('label', 'Station code'); label.setAttribute('for', 'camera-station-code');
+  const input = el('input'); input.id = 'camera-station-code'; input.placeholder = 'DEMO-001'; input.maxLength = 40; input.required = true;
+  const submit = el('button', 'Use code', 'button secondary'); submit.type = 'submit';
+  manual.append(label, input, submit); manual.addEventListener('submit', event => { event.preventDefault(); requestQuote(input.value); }); sheet.append(manual);
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
     if (!sheet.isConnected) { stream.getTracks().forEach(track => track.stop()); return; }
@@ -282,8 +325,8 @@ if (typeof setInterval === 'function') setInterval(updateClock, 1000);
 for (const [id, target] of Object.entries(navigation)) $(id).addEventListener('click', () => navigate(target));
 $('account-button').addEventListener('click', () => navigate('profile'));
 $('home-scan').addEventListener('click', startRental);
-$('home-code').addEventListener('click', startRental);
-window.addEventListener('hashchange', () => navigate(String(location.hash || '#home').slice(1), false));
+$('home-code').addEventListener('click', () => { scanAfterLogin = false; navigate('scan'); });
+window.addEventListener('hashchange', () => { const next = String(location.hash || '#home').slice(1); if (next !== view) navigate(next, false); });
 window.addEventListener('popstate', closeSheet);
 $('refresh-history').addEventListener('click', memberData);
 $('refresh-stations').addEventListener('click', stations);

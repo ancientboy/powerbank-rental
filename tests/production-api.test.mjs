@@ -281,7 +281,7 @@ test("SQLite formal schema migration is idempotent and survives reopen", () => {
     db = openProductionStore(path);
     assert.equal(
       db.prepare("SELECT count(*) n FROM schema_migrations").get().n,
-      3,
+      4,
     );
     assert.match(
       db.prepare("SELECT data FROM records").get().data,

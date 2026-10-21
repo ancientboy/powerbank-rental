@@ -42,12 +42,13 @@ test('independent rental review: formal TEST cycle persists active state and imm
     f.reopen();
     assert.equal((await f.ok(prefix + 'state', a)).rental.id, rental.id);
     const pay = await f.ok(prefix + 'pay', a, { rentalId: rental.id, outcome: 'success' });
-    assert.equal(pay.rental.status, 'active'); assert.equal(pay.payment.provider, 'mock');
+    assert.equal(pay.rental.status, 'awaiting_pickup');
+    await f.ok(prefix + 'pickup', a, { rentalId: rental.id, outcome: 'success' }); assert.equal(pay.payment.provider, 'mock');
     f.advance(3601000); f.reopen();
-    assert.equal((await f.ok(prefix + 'state', a)).rental.totalAmount, 20000);
+    assert.equal((await f.ok(prefix + 'state', a)).rental.totalAmount, 100000);
     const receipt = await f.ok(prefix + 'return', a, { rentalId: rental.id });
     assert.equal(receipt.rental.status, 'completed'); assert.equal(receipt.rental.testOnly, true);
-    assert.equal(receipt.payment.amount, 20000); assert.equal(receipt.payment.provider, 'mock');
+    assert.equal(receipt.payment.amount, 100000); assert.equal(receipt.payment.provider, 'mock');
     f.advance(3600000); f.reopen();
     const state = await f.ok(prefix + 'state', a);
     assert.equal(state.rental, null); assert.deepEqual(state.rentals[0], receipt.rental);
@@ -64,7 +65,7 @@ test('independent rental review: ownership enforced even with known foreign IDs 
     assert.notEqual(qa.quote.id, qb.quote.id);
     assert.equal((await f.call(prefix + 'rent', b, { quoteId: qa.quote.id })).status, 404);
     const ra = (await f.ok(prefix + 'rent', a, { quoteId: qa.quote.id })).rental;
-    for (const action of ['pay', 'cancel', 'return']) assert.equal((await f.call(prefix + action, b, { rentalId: ra.id, outcome: 'success' })).status, 404);
+    for (const action of ['pay', 'pickup', 'cancel', 'return']) assert.equal((await f.call(prefix + action, b, { rentalId: ra.id, outcome: 'success' })).status, 404);
     assert.deepEqual((await f.ok(prefix + 'state', b)).rentals, []);
     assert.deepEqual((await f.ok('/api/user/rentals', b)).rentals, []);
     assert.equal((await f.ok(prefix + 'state', a)).rental.status, 'pending_payment');
@@ -79,10 +80,11 @@ test('independent rental review: failures retry, double clicks do not duplicate 
     assert.equal((await f.call(prefix + 'pay', a, { rentalId: rental.id, outcome: 'success' }, key)).status, 409);
     const results = await Promise.all([1,2].map(() => f.ok(prefix + 'pay', a, { rentalId: rental.id, outcome: 'success' })));
     assert.equal(results[0].payment.id, results[1].payment.id);
+    await f.ok(prefix + 'pickup', a, { rentalId: rental.id, outcome: 'success' });
     assert.equal((await f.call(prefix + 'cancel', a, { rentalId: rental.id })).status, 409);
     const returns = await Promise.all([1,2].map(() => f.ok(prefix + 'return', a, { rentalId: rental.id })));
     assert.equal(returns[0].payment.id, returns[1].payment.id);
-    assert.equal(f.db.prepare("SELECT count(*) n FROM test_records WHERE kind='payment'").get().n, 3);
+    assert.equal(f.db.prepare("SELECT count(*) n FROM test_records WHERE kind='payment'").get().n, 4);
     const next = await rent(f, a);
     await f.ok(prefix + 'cancel', a, { rentalId: next.id });
     assert.equal((await f.call(prefix + 'pay', a, { rentalId: next.id, outcome: 'success' })).status, 409);
@@ -159,6 +161,9 @@ test('independent rental review: customer JavaScript drives formal API from mock
     assert.match(h.elements.get('notice').textContent, /failed.*Retry/);
     await h.run("transact('pay', {rentalId:testState.rental.id,outcome:'success'})");
     h = await render();
+    assert.match(nodeText(h.elements.get('rental-flow')), /Waiting for pickup/);
+    assert.equal(h.run('testState.rental.startedAt'), null);
+    await h.run("transact('pickup', {rentalId:testState.rental.id,outcome:'success'})");
     assert.match(nodeText(h.elements.get('rental-flow')), /ACTIVE TEST RENTAL/);
     await h.run("transact('return', {rentalId:testState.rental.id})");
     assert.match(nodeText(h.elements.get('rentals')), /Returned · settled/);

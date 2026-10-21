@@ -14,7 +14,7 @@ class Element {
   constructor(tag = 'div') { this.tagName=tag; this.children=[]; this.events={}; this.attributes={}; this.style={}; this.value=''; this.classes=new Set(); this.classList={add:n=>this.classes.add(n),remove:n=>this.classes.delete(n),toggle:(n,v)=>{if(v===undefined?!this.classes.has(n):v)this.classes.add(n);else this.classes.delete(n);}}; }
   append(...nodes){this.children.push(...nodes);} replaceChildren(...nodes){this.children=nodes;} setAttribute(k,v){this.attributes[k]=v;} addEventListener(k,v){this.events[k]=v;} focus(){} scrollIntoView(){} querySelector(tag){return flat(this).find(n=>n.tagName===tag);} querySelectorAll(){return flat(this).filter(n=>n.tagName==='button');}
 }
-const pricing={currency:'ARS',hourlyRate:10000,dailyCap:60000,deposit:0};
+const pricing={currency:'ARS',hourlyRate:50000,dailyCap:300000,deposit:1000000};
 const rental=status=>({id:'r1',stationId:'DEMO-001',stationName:'Demo station',pricing,status,startedAt:new Date().toISOString(),createdAt:new Date().toISOString(),totalAmount:10000});
 async function harness({authenticated=true,status=null,hash=''}={}) {
   const elements=new Map(),events={},requests=[]; let user=authenticated?{id:'test-user',name:'Test customer',isTest:true}:null;
@@ -29,7 +29,8 @@ async function harness({authenticated=true,status=null,hash=''}={}) {
       if(path.endsWith('/stations'))data={stations:[{id:'DEMO-001',name:'Demo station',active:true,available:3}],pricing};
       if(path.endsWith('/quote'))data={quote:{id:'q1',pricing}};
       if(path.endsWith('/rent')){current={rental:rental('pending_payment'),rentals:[rental('pending_payment')]};data={rental:current.rental};}
-      if(path.endsWith('/pay')){current={rental:rental(JSON.parse(options.body).outcome==='success'?'active':'pending_payment'),rentals:[]};data={rental:current.rental};}
+      if(path.endsWith('/pay')){current={rental:rental(JSON.parse(options.body).outcome==='success'?'awaiting_pickup':'pending_payment'),rentals:[]};data={rental:current.rental};}
+      if(path.endsWith('/pickup')){current={rental:rental('active'),rentals:[]};data={rental:current.rental};}
       if(path.endsWith('/return')){current={rental:null,rentals:[rental('completed')]};data={rental:current.rentals[0]};}
       return{ok:true,status:200,json:async()=>data};}
   });vm.runInContext(source,context);await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
@@ -74,7 +75,7 @@ test('back/forward hash navigation dismisses modal and never submits return',asy
 });
 test('formal TEST quote/payment/return flow remains isolated after restored navigation',async()=>{
   const h=await harness();await h.run("requestQuote('DEMO-001')");assert.equal(h.run('view'),'scan');await h.run("transact('rent',{quoteId:quote.id})");await h.run("transact('pay',{rentalId:testState.rental.id,outcome:'success'})");
-  await h.click('mobile-history');await h.click('home-scan');assert.equal(h.run('testState.rental.status'),'active');
+  await h.click('mobile-history');await h.click('home-scan');assert.equal(h.run('testState.rental.status'),'awaiting_pickup');await h.run("transact('pickup',{rentalId:testState.rental.id,outcome:'success'})");assert.equal(h.run('testState.rental.status'),'active');
   await h.run("transact('return',{rentalId:testState.rental.id})");assert.match(text(h.elements.get('sheet-root')),/Test rental receipt/);h.run('closeSheet()');await h.click('mobile-history');assert.match(text(h.elements.get('rentals')),/Returned · settled/);
   for(const r of h.requests.filter(r=>r.options.method==='POST')){assert.match(r.path,/^\/api\/user\/test\//);assert.equal(r.options.headers['X-CSRF-Token'],'session-csrf');assert.match(r.options.headers['Idempotency-Key'],/^[a-f0-9-]{36}$/);}
   assert.doesNotMatch(source+html,/\/v1\/|\/api\/admin|\/admin|Continue with Apple|Apple Pay|innerHTML|insertAdjacentHTML/);

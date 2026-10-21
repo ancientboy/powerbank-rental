@@ -163,7 +163,7 @@ export function createProductionAPI({
           fail(400, "Invalid request");
       }
       if (path === "/health" && method === "GET")
-        return json({ status: "ok", mode: "production", schemaVersion: 3 });
+        return json({ status: "ok", mode: "production", schemaVersion: 4 });
       if (path === "/api/admin/login" && method === "POST") {
         const username = text(body.username, 100).toLowerCase();
         rate("admin-global", 60, 15 * 60000);

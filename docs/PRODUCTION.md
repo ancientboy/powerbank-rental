@@ -4,7 +4,7 @@
 
 先确认旧应用目录、进程管理方式、反向代理和数据位置。不要覆盖 `.local/demo.sqlite`、旧 `.env`、上传文件或供应商资料，不要直接运行清库命令。旧演示账户不是已验证身份，不可转换为正式用户/管理员；旧支付不是财务记录，旧机柜不是实际库存。将旧数据保留在独立只读归档，不把它导入新生产库。
 
-本版本使用新文件 `production.sqlite` 和独立表结构；初次启动创建 schema_migrations versions 1、2，重复启动不会清空数据。生产目录必须持久化，不能放在每次发布删除的临时目录。当前仅支持单个 Node 进程和单台主机 SQLite；不要开启 PM2 cluster 或多实例写同一文件。
+本版本使用新文件 `production.sqlite` 和独立表结构；初次启动创建 schema_migrations versions 1–4，重复启动不会清空数据。生产目录必须持久化，不能放在每次发布删除的临时目录。当前仅支持单个 Node 进程和单台主机 SQLite；不要开启 PM2 cluster 或多实例写同一文件。
 
 ## 2. 构建和文件布局
 
@@ -75,7 +75,7 @@ https://developers.google.com/identity/protocols/oauth2/web-server#uri-validatio
 
 SQLite 处于 WAL 模式，运行中不能只复制主 .sqlite 文件。推荐使用 SQLite backup API 或在计划维护窗口停止应用后复制数据库及必要 WAL/SHM 一致性文件；优先用在线备份命令 `npm run backup -- /secure-backup/voltgo-YYYYMMDD.sqlite`。备份含个人数据与密码哈希，访问仅限授权维护人员，单独加密保存并定期做恢复演练。
 
-升级前备份数据库和当前版本配置，记录当前 Git 提交。新版本独立目录运行测试/构建，不覆盖数据；检查迁移说明后切换 current，再由管理员重启服务。启动 /health 返回 production 和 schemaVersion 3；检查独立管理员登录、匿名 API 401、退出失效、空/真实站点状态、Google pending、PVS/WsCharge pending。不要把旧测试支付导入真实账目。
+升级前备份数据库和当前版本配置，记录当前 Git 提交。新版本独立目录运行测试/构建，不覆盖数据；检查迁移说明后切换 current，再由管理员重启服务。启动 /health 返回 production 和 schemaVersion 4；检查独立管理员登录、匿名 API 401、退出失效、空/真实站点状态、Google pending、PVS/WsCharge pending。不要把旧测试支付导入真实账目。
 
 回滚代码前核实新旧数据库结构兼容；不能随意用旧备份覆盖已产生的业务数据。schema v2 新增 test_users / test_login_states 两个独立表；schema v3 新增 test_records / test_rentals / test_idempotency 独立模拟业务表，不改变原有 users / admins / 业务记录。迁移可重复执行，不导入旧 demo 数据。恢复演练在隔离目录/端口，不要连接真实支付/机柜。
 
@@ -104,18 +104,23 @@ SQLite 处于 WAL 模式，运行中不能只复制主 .sqlite 文件。推荐�
 
 仅当既有 googleTestEnabled 条件满足且当前会话 user.isTest=true 时开放。无需第二个开关。真实 Google 用户不能进入模拟端点；TEST 用户也不能借此调用真实硬件/支付。DEMO-001 是程序内固定的虚拟站点，不写入真实 station 记录，不能对应机柜。模拟模块没有网络或支付/硬件适配器调用。
 
-所有模拟业务写入 SQLite 的 test_records、test_rentals、test_idempotency 表，与 records 中的真实 rental/payment/station 分开。后台 dashboard 分别返回 testRentals、testPayments、testStations，不能计入真实营业额。关闭测试开关会撤销 TEST 会话和身份绑定，保留历史，不删除真实或测试业务记录。迁移 v3 为增量、可重复执行；重启后使用仍有效的浏览器身份可继续未完成的模拟订单。清空 cookie 后不能自动找回旧身份。
+所有模拟业务写入 SQLite 的 test_records、test_rentals、test_idempotency 表，与 records 中的真实 rental/payment/station 分开。后台 dashboard 分别返回 testRentals、testPayments、testStations，不能计入真实营业额。关闭测试开关会撤销 TEST 会话和身份绑定，保留历史，不删除真实或测试业务记录。迁移 v4 保留旧数据并重建模拟租赁状态约束及唯一索引，可重复执行；重启后使用仍有效的浏览器身份可继续未完成的模拟订单。清空 cookie 后不能自动找回旧身份。
 
-金额单位为 ARS 分：hourlyRate=10000（ARS 100/开始的小时）、dailyCap=60000（ARS 600/每个 24 小时周期）、deposit=0。最低计一小时，不满一小时向上取整；每 24 小时周期分别封顶。报价有效五分钟，报价保存费率快照，创建订单后不随后台真实费率变化。服务器时钟决定起租、归还和费用；客户端金额/时间不能覆盖服务器记录。模拟授权金额 0，不发生真实收费；模拟归还只产生一笔测试结算，不能作为收据或真实支付证明。
+金额单位为 ARS 分；恢复原演示的示例费率：hourlyRate=50000（ARS 500/开始的小时）、dailyCap=300000（ARS 3,000/每个 24 小时周期）、deposit=1000000（ARS 10,000）。版本 test-deposit-v2、illustrative=true，仅为演示，不是确认的商业费率。最低计一小时，不满一小时向上取整，每 24 小时周期分别封顶。报价有效五分钟，并保存费率快照。无钱包或充值，不调用 PVS、Google Pay、银行或机柜；所有金额、押金、扣费和退款均为模拟，不能作为真实收据或支付证明。
 
 API（仅 TEST 会话，所有响应 Cache-Control:no-store）：
 - GET /api/user/test/stations：{testOnly, stations, pricing}。
-- GET /api/user/test/state：{testOnly, serverNow, rental, rentals}。rental 为当前待支付/使用中的订单或 null；rentals 为该账户全部模拟历史。使用中订单含服务器估算的 durationSeconds、totalAmount。
+- GET /api/user/test/state：{testOnly, serverNow, rental, rentals}。当前订单包括 pending_payment / awaiting_pickup / active，或 null。
 - POST /api/user/test/quote：{stationId:"DEMO-001"} → {quote}，含 id、pricing、expiresAt。
-- POST /api/user/test/rent：{quoteId} → {rental}，初始 pending_payment；每个用户最多一个 pending_payment/active 订单。
-- POST /api/user/test/pay：{rentalId,outcome:"success"|"failure"} → {rental,payment}。失败保持待支付，可重试；成功转 active，服务端设置 startedAt。重复成功不会再生成授权。
-- POST /api/user/test/cancel：{rentalId} → {rental}。仅待支付订单可取消；已使用订单必须归还。
-- POST /api/user/test/return：{rentalId} → {rental,payment}。active 转 completed，持久化 returnedAt、durationSeconds、totalAmount 和唯一 settlementId；重复归还返回已有结果。
+- POST /api/user/test/rent：{quoteId} → {rental}，初始 pending_payment；每个用户最多一个待支付、待取或使用中的订单。
+- POST /api/user/test/pay：{rentalId,outcome:"success"|"failure",paymentMethod:"card"|"google_pay"|"bank_transfer"} → {rental,payment}。支付方式默认 card，仅记录模拟选择，不连接支付服务。失败保持待支付，未收押金；成功生成唯一 deposit 交易并转 awaiting_pickup，startedAt=null、费用为零。重复成功不重复收取押金。
+- POST /api/user/test/pickup：{rentalId,outcome:"success"|"failure"}。仅待取订单可以首次模拟取走；成功转 active，服务器设置 startedAt 后才计时；失败取消并模拟全额退款。重复调用不改变原取走结果。
+- POST /api/user/test/cancel：{rentalId}。待支付可取消；待取可取消并全额模拟退款；使用中必须归还。重复取消不重复退款。
+- POST /api/user/test/return：{rentalId} → {rental,payment,refund}。active 转 completed 并保存 returnedAt、durationSeconds、totalAmount。rental_fee 交易仅记录从已付押金扣除的金额，不是再次支付；refund 交易单独记录押金余额退还。重复归还返回已有结果，不重复扣除或退款。
+
+订单记录 depositPaid、depositApplied、refundAmount、outstandingAmount，押金支付/费用抵扣/退款分别引用 depositPaymentId、settlementId、refundId。费用超过押金时，仅抵扣已有押金，退款为零，差额记录 outstandingAmount、settlementStatus=review_required，不追加扣款。退款在本模拟中总是成功，不代表真实支付网关支持退款。
+
+迁移 v4 仅重建 test_rentals 的状态 CHECK 和开放订单唯一索引，使 awaiting_pickup 受保护；保留所有用户、会话、真实业务、模拟记录和幂等响应。旧版零押金报价、订单及历史不补收或伪造已付押金，读取时标记 legacy=true。旧待支付订单须明确取消后重新报价，不能直接支付新押金；旧 active 订单可归还，保留原费率计算应计费用并标记 legacy_review，不额外扣款或生成虚构退款。旧 completed 历史保持原记录。回滚前核实 awaiting_pickup 状态与旧代码不兼容，不得直接用旧代码操作新订单。
 
 每次 POST 必须附同源 Origin、会话 x-csrf-token 和 Idempotency-Key（8–128 位字母、数字、下划线或短横线，推荐 UUID）。同一逻辑请求的网络重试复用该 key；不同操作必须换 key。相同 key 和请求返回持久化原响应，不同请求复用 key 返回 409。重复 quoteId 创建订单也返回原订单，不生成第二笔订单。身份、所有权校验和幂等写入均在服务端；不能用别人的 quoteId/rentalId 操作。GET /api/user/rentals 对 TEST 用户返回自己的模拟历史，对真实用户仍只返回真实记录。原 /api/user/rent、/pay、/return 保持 503，不会通过此变更启用供应商功能。
 
