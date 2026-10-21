@@ -39,9 +39,12 @@ async function harness({authenticated=true, state={rental:null,rentals:[]}}={}) 
   vm.runInContext(source,context); await new Promise(resolve=>setImmediate(resolve));
   return {run:code=>vm.runInContext(code,context),elements,requests,context};
 }
-test('TEST session opens scan surface, not account marketing, and rejects non-demo codes', async()=>{
+test('TEST session restores original home and opens separate scan screen, rejecting non-demo codes', async()=>{
   const h=await harness();
   assert.ok(h.elements.get('account').hiddenClasses.has('hidden'));
+  assert.ok(!h.elements.get('home-screen').hiddenClasses.has('hidden'));
+  assert.ok(h.elements.get('rental-home').hiddenClasses.has('hidden'));
+  h.run('startRental()');
   assert.ok(!h.elements.get('rental-home').hiddenClasses.has('hidden'));
   assert.match(text(h.elements.get('rental-flow')),/Mock scan · DEMO-001/);
   const count=h.requests.length;await h.run("requestQuote('REAL-001')");assert.equal(h.requests.length,count);assert.match(h.elements.get('notice').textContent,/Only the demo/);
@@ -75,4 +78,23 @@ test('ambiguous mutation retries preserve key; distinct logical outcomes use sep
   const h=await harness();const keys=[];h.context.fetch=async(path,opts)=>{keys.push(opts.headers['Idempotency-Key']);throw new Error('Network lost');};
   await assert.rejects(h.run("mutate('pay',{rentalId:'r1',outcome:'success'})"));await assert.rejects(h.run("mutate('pay',{rentalId:'r1',outcome:'success'})"));await assert.rejects(h.run("mutate('pay',{rentalId:'r1',outcome:'failure'})"));
   assert.equal(keys[0],keys[1]);assert.notEqual(keys[0],keys[2]);
+});
+
+test('original tabs switch single screens and retain active rental and quote state', async () => {
+  const h = await harness();
+  for (const [route, id] of [['stations','stations'],['history','member-area'],['profile','account'],['home','home-screen']]) {
+    h.run(`navigate('${route}')`);
+    assert.ok(!h.elements.get(id).hiddenClasses.has('hidden'));
+    assert.equal(h.elements.get('mobile-' + route).attributes['aria-current'], 'page');
+    assert.ok(h.elements.get('rental-home').hiddenClasses.has('hidden'));
+  }
+  await h.run("requestQuote('DEMO-001')");
+  h.run("navigate('profile'); navigate('scan')");
+  assert.match(text(h.elements.get('rental-flow')), /Review your rental/);
+  assert.equal(h.elements.get('mobile-home').attributes['aria-current'], 'page');
+  h.run('openSheet("Receipt")');
+  assert.equal(h.elements.get('customer-shell').inert, true);
+  h.run("navigate('history')");
+  assert.equal(h.elements.get('customer-shell').inert, false);
+  assert.equal(h.elements.get('sheet-root').children.length, 0);
 });

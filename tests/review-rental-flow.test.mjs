@@ -169,7 +169,19 @@ test('independent rental review: customer JavaScript drives formal API from mock
     assert.equal(h.elements.get('stations').classList.contains('hidden'), true);
     const logout = h.elements.get('account-content').children.find(n => n.textContent === 'Sign out');
     await logout.events.click();
-    assert.equal(h.elements.get('stations').classList.contains('hidden'), false, 'sign-out must restore non-TEST station section');
+    assert.equal(h.run('view'), 'home', 'sign-out returns to the original home screen');
+    assert.equal(h.elements.get('home-screen').classList.contains('hidden'), false);
+    assert.equal(h.elements.get('stations').classList.contains('hidden'), true, 'stations are now an independent screen');
+    assert.equal(h.run('session.user'), null);
+    assert.equal(h.run('testState'), null);
+    assert.equal(h.run('quote'), null);
+    assert.equal(requests.at(-1), '/api/user/stations', 'sign-out reloads non-TEST station data');
+    assert.equal(h.run('stationData.stations.length'), 0);
+    h.run("navigate('stations')");
+    assert.equal(h.elements.get('stations').classList.contains('hidden'), false);
+    assert.equal(h.elements.get('home-screen').classList.contains('hidden'), true);
+    assert.match(nodeText(h.elements.get('station-list')), /No stations available yet/);
+    assert.doesNotMatch(nodeText(h.elements.get('station-list')), /DEMO-001|Return here|Rent here/);
     assert.ok(requests.includes('/api/user/test/quote'));
     assert.ok(!requests.some(path => /\/v1\/|\/api\/admin|\/api\/user\/(pay|rent|return)$/.test(path)));
   } finally { f.close(); }

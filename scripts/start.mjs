@@ -21,6 +21,7 @@ const assets = new Map([
   ["/app.js", "app.js"],
   ["/admin.js", "admin.js"],
   ["/production.css", "production.css"],
+  ["/customer.css", "customer.css"],
 ]);
 const server = http.createServer(async (req, res) => {
   const headers = {

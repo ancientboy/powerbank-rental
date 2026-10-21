@@ -4,6 +4,7 @@ for (const path of [
   "dist/scripts/start.mjs",
   "dist/src/production-api.mjs",
   "dist/production-public/index.html",
+  "dist/production-public/customer.css",
   "dist/production-public/admin.html",
 ])
   await access(path);
