@@ -58,6 +58,11 @@ export function openProductionStore(path) {
   db.exec(`CREATE TABLE IF NOT EXISTS test_users(id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS test_login_states(browser_hash TEXT PRIMARY KEY, csrf TEXT NOT NULL, expires INTEGER NOT NULL, user_id TEXT REFERENCES test_users(id));
   INSERT OR IGNORE INTO schema_migrations VALUES(2,datetime('now'));`);
+  db.exec(`CREATE TABLE IF NOT EXISTS test_records(kind TEXT NOT NULL, id TEXT NOT NULL, owner_id TEXT NOT NULL REFERENCES test_users(id), data TEXT NOT NULL, PRIMARY KEY(kind,id));
+  CREATE TABLE IF NOT EXISTS test_rentals(id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES test_users(id), status TEXT NOT NULL CHECK(status IN ('pending_payment','active','completed','cancelled')), quote_id TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
+  CREATE UNIQUE INDEX IF NOT EXISTS test_one_open_rental ON test_rentals(owner_id) WHERE status IN ('pending_payment','active');
+  CREATE TABLE IF NOT EXISTS test_idempotency(owner_id TEXT NOT NULL REFERENCES test_users(id), key TEXT NOT NULL, fingerprint TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(owner_id,key));
+  INSERT OR IGNORE INTO schema_migrations VALUES(3,datetime('now'));`);
   return db;
 }
 export function listRecords(db, kind, owner) {

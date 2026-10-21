@@ -29,7 +29,7 @@ test('production templates use external scripts, no inline events or legacy cust
 });
 test('customer empty states and missing Google configuration are explicit', async () => {
   const h = await harness('app.js', '/', { '/api/user/session': { user: null, readiness: { google: { ready: false } } }, '/api/user/stations': { stations: [], pricing: { hourlyRate: 15000, dailyCap: 50000, deposit: 100000, currency: 'ARS' } } });
-  assert.match(text(h.elements.get('account-content')), /Google sign-in is not configured yet/); assert.match(text(h.elements.get('station-list')), /no stations available yet/); assert.match(h.elements.get('pricing').textContent, /150\.00/); assert.equal(h.requests.length, 2);
+  assert.match(text(h.elements.get('account-content')), /Google sign-in is unavailable/); assert.match(text(h.elements.get('station-list')), /No stations available yet/); assert.match(h.elements.get('pricing').textContent, /150\.00/); assert.equal(h.requests.length, 2);
 });
 test('customer Google button uses only configured real OAuth endpoint', async () => {
   const h = await harness('app.js', '/', { '/api/user/session': { user: null, readiness: { google: { ready: true } } }, '/api/user/stations': { stations: [] } });

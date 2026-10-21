@@ -41,20 +41,20 @@ export function readiness(config) {
     google: {
       ready: googleConfigured(config),
       label: googleConfigured(config)
-        ? "Configured; sign-in available"
-        : "Awaiting Google OAuth configuration",
+        ? "Configured"
+        : "Not configured",
     },
     googleTest: {
       ready: googleTestEnabled(config),
       label: googleTestEnabled(config)
-        ? "Temporary test sign-in enabled; not Google authentication"
+        ? "TEST sign-in enabled (not Google)"
         : "Test sign-in disabled",
     },
-    pvs: { ready: false, label: "Integration pending; payments disabled" },
+    pvs: { ready: false, label: "Pending integration" },
     wscharge: {
       ready: false,
       label:
-        "Vendor protocol confirmation and physical testing pending; hardware disabled",
+        "Pending integration",
     },
   };
 }

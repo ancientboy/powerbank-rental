@@ -56,7 +56,9 @@ test('independent test login review: identities are browser-isolated and remain 
     assert.notEqual(a.user.id, b.user.id);
     assert.equal(a.user.isTest, true);
     assert.equal(a.user.provider, 'google_test');
-    putRecord(f.db, 'rental', 'a-private', { id: 'a-private' }, a.user.id);
+    // TEST history is now isolated from production records.
+    f.db.prepare('INSERT INTO test_rentals VALUES(?,?,?,?,?)').run('a-private', a.user.id, 'completed', 'fixture-quote', JSON.stringify({ id: 'a-private', userId: a.user.id, status: 'completed', testOnly: true }));
+    putRecord(f.db, 'rental', 'real-only', { id: 'real-only' }, a.user.id);
     const submitted = await f.call('/api/user/support', { ...a, method: 'POST', body: { message: 'Independent review support request' } });
     assert.equal(submitted.status, 201);
     const ticket = (await submitted.json()).support;

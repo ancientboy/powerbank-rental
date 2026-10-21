@@ -69,15 +69,15 @@ https://developers.google.com/identity/protocols/oauth2/web-server#uri-validatio
 
 ## 6. PVS / WsCharge
 
-仍为 pending。界面展示状态，但不存在一键启用或假成功；所有租出、扣款和归还命令返回不可用。待用户提供供应商协议、环境、认证/签名、事件去重、查询/退款/结算说明再开发真实适配器和验收。WsCharge 原始厂商资料不放公共仓库。现有离线 codec 不等于运行中的设备网关，也不依据65命令 ACK 开始计费。
+仍为 pending。界面展示状态，但不存在一键启用或假成功；真实租出、扣款和归还命令返回不可用；受控 TEST 账户可使用独立的纯模拟流程（见第 10 节）。待用户提供供应商协议、环境、认证/签名、事件去重、查询/退款/结算说明再开发真实适配器和验收。WsCharge 原始厂商资料不放公共仓库。现有离线 codec 不等于运行中的设备网关，也不依据65命令 ACK 开始计费。
 
 ## 7. 备份、升级与回滚
 
 SQLite 处于 WAL 模式，运行中不能只复制主 .sqlite 文件。推荐使用 SQLite backup API 或在计划维护窗口停止应用后复制数据库及必要 WAL/SHM 一致性文件；优先用在线备份命令 `npm run backup -- /secure-backup/voltgo-YYYYMMDD.sqlite`。备份含个人数据与密码哈希，访问仅限授权维护人员，单独加密保存并定期做恢复演练。
 
-升级前备份数据库和当前版本配置，记录当前 Git 提交。新版本独立目录运行测试/构建，不覆盖数据；检查迁移说明后切换 current，再由管理员重启服务。启动 /health 返回 production 和 schemaVersion 2；检查独立管理员登录、匿名 API 401、退出失效、空/真实站点状态、Google pending、PVS/WsCharge pending。不要把旧测试支付导入真实账目。
+升级前备份数据库和当前版本配置，记录当前 Git 提交。新版本独立目录运行测试/构建，不覆盖数据；检查迁移说明后切换 current，再由管理员重启服务。启动 /health 返回 production 和 schemaVersion 3；检查独立管理员登录、匿名 API 401、退出失效、空/真实站点状态、Google pending、PVS/WsCharge pending。不要把旧测试支付导入真实账目。
 
-回滚代码前核实新旧数据库结构兼容；不能随意用旧备份覆盖已产生的业务数据。当前 schema v2 新增 test_users / test_login_states 两个独立表，不改变原有 users / admins / 业务记录。迁移可重复执行，不导入旧 demo 数据。恢复演练在隔离目录/端口，不要连接真实支付/机柜。
+回滚代码前核实新旧数据库结构兼容；不能随意用旧备份覆盖已产生的业务数据。schema v2 新增 test_users / test_login_states 两个独立表；schema v3 新增 test_records / test_rentals / test_idempotency 独立模拟业务表，不改变原有 users / admins / 业务记录。迁移可重复执行，不导入旧 demo 数据。恢复演练在隔离目录/端口，不要连接真实支付/机柜。
 
 ## 8. 已知边界
 
@@ -91,10 +91,32 @@ SQLite 处于 WAL 模式，运行中不能只复制主 .sqlite 文件。推荐�
 1. 先备份 SQLite，更新代码并运行 npm test、npm run build；继续使用原来的 DATABASE_PATH。
 2. 在服务进程读取的环境配置中设置 ENABLE_GOOGLE_TEST_LOGIN=1，同时保持 GOOGLE_CLIENT_ID 和 GOOGLE_CLIENT_SECRET 都为空。不要把真实配置提交到仓库。项目不会自动读取 .env；使用现有 systemd EnvironmentFile 或启动时 node --env-file=/安全路径/应用.env scripts/start.mjs。
 3. 重启应用，打开用户首页 Your account，点击 Continue with Google (test)。无需邮箱、密码或 Google 授权。/api/user/session 中 readiness.googleTest.ready 应为 true，登录后 user.isTest 为 true。
-4. 可检查账户、空订单列表、创建测试工单及后台回复。账户与工单会写入正式共享 SQLite，但标为 TEST；不同浏览器互相隔离，管理员能看见这些测试数据。
+4. 可检查账户、使用 DEMO-001 模拟扫码租借、模拟支付/失败重试/取消、归还与结算历史，以及创建测试工单及后台回复。账户与工单会写入正式共享 SQLite，但标为 TEST；不同浏览器互相隔离，管理员能看见这些测试数据。
 5. 同一浏览器退出再登录会恢复自己的测试账户。身份依据随机 HttpOnly cookie，不依据输入的邮箱、Google sub 或角色；清空 cookie、使用无痕窗口或浏览器绑定超过 30 天会获得新测试账户。保留 cookie 可在服务重启后继续访问原测试资料。退出撤销登录会话，但保留此测试身份绑定。
 6. 关闭时将 ENABLE_GOOGLE_TEST_LOGIN=0 并重启。服务会撤销测试会话与浏览器绑定，测试记录保留用于审计，不删除真实资料。即使以后再打开，也不会恢复已撤销的旧绑定。真实 Google 的任一配置项非空时，测试模式同样强制关闭，包括配置不完整或 IP 地址不支持 OAuth 的情况。正式启用 Google 时同时明确设回 0。
 
 测试用户与真实 Google 用户使用独立表及命名空间，不能自动合并、冒充真实 Google 账户或取得后台权限。真实 Google 登录后不会自动带入测试订单/工单。
 
-重要：模拟登录仅解决客户身份流程，不会启用真机借还或真实支付。本版租出、扣款、归还仍返回不可用；TEST 身份也不构成未来真实硬件/支付授权。后续 WsCharge 联调必须另行设计并授权测试账户白名单、测试机柜白名单和独立操作权限，不能仅凭 isTest 登录就打开生产机柜或扣款。PVS 继续预留，当前不发生真实收费。
+重要：模拟登录和模拟租赁不会启用真机借还或真实支付。真实租出、扣款、归还仍返回不可用；TEST 身份也不构成未来真实硬件/支付授权。后续 WsCharge 联调必须另行设计并授权测试账户白名单、测试机柜白名单和独立操作权限，不能仅凭 isTest 登录就打开生产机柜或扣款。PVS 继续预留，当前不发生真实收费。
+
+
+## 10. 同一服务内的 TEST 模拟租赁
+
+仅当既有 googleTestEnabled 条件满足且当前会话 user.isTest=true 时开放。无需第二个开关。真实 Google 用户不能进入模拟端点；TEST 用户也不能借此调用真实硬件/支付。DEMO-001 是程序内固定的虚拟站点，不写入真实 station 记录，不能对应机柜。模拟模块没有网络或支付/硬件适配器调用。
+
+所有模拟业务写入 SQLite 的 test_records、test_rentals、test_idempotency 表，与 records 中的真实 rental/payment/station 分开。后台 dashboard 分别返回 testRentals、testPayments、testStations，不能计入真实营业额。关闭测试开关会撤销 TEST 会话和身份绑定，保留历史，不删除真实或测试业务记录。迁移 v3 为增量、可重复执行；重启后使用仍有效的浏览器身份可继续未完成的模拟订单。清空 cookie 后不能自动找回旧身份。
+
+金额单位为 ARS 分：hourlyRate=10000（ARS 100/开始的小时）、dailyCap=60000（ARS 600/每个 24 小时周期）、deposit=0。最低计一小时，不满一小时向上取整；每 24 小时周期分别封顶。报价有效五分钟，报价保存费率快照，创建订单后不随后台真实费率变化。服务器时钟决定起租、归还和费用；客户端金额/时间不能覆盖服务器记录。模拟授权金额 0，不发生真实收费；模拟归还只产生一笔测试结算，不能作为收据或真实支付证明。
+
+API（仅 TEST 会话，所有响应 Cache-Control:no-store）：
+- GET /api/user/test/stations：{testOnly, stations, pricing}。
+- GET /api/user/test/state：{testOnly, serverNow, rental, rentals}。rental 为当前待支付/使用中的订单或 null；rentals 为该账户全部模拟历史。使用中订单含服务器估算的 durationSeconds、totalAmount。
+- POST /api/user/test/quote：{stationId:"DEMO-001"} → {quote}，含 id、pricing、expiresAt。
+- POST /api/user/test/rent：{quoteId} → {rental}，初始 pending_payment；每个用户最多一个 pending_payment/active 订单。
+- POST /api/user/test/pay：{rentalId,outcome:"success"|"failure"} → {rental,payment}。失败保持待支付，可重试；成功转 active，服务端设置 startedAt。重复成功不会再生成授权。
+- POST /api/user/test/cancel：{rentalId} → {rental}。仅待支付订单可取消；已使用订单必须归还。
+- POST /api/user/test/return：{rentalId} → {rental,payment}。active 转 completed，持久化 returnedAt、durationSeconds、totalAmount 和唯一 settlementId；重复归还返回已有结果。
+
+每次 POST 必须附同源 Origin、会话 x-csrf-token 和 Idempotency-Key（8–128 位字母、数字、下划线或短横线，推荐 UUID）。同一逻辑请求的网络重试复用该 key；不同操作必须换 key。相同 key 和请求返回持久化原响应，不同请求复用 key 返回 409。重复 quoteId 创建订单也返回原订单，不生成第二笔订单。身份、所有权校验和幂等写入均在服务端；不能用别人的 quoteId/rentalId 操作。GET /api/user/rentals 对 TEST 用户返回自己的模拟历史，对真实用户仍只返回真实记录。原 /api/user/rent、/pay、/return 保持 503，不会通过此变更启用供应商功能。
+
+上线验收至少覆盖：模拟登录后进入扫码入口、DEMO-001 及无效站码、报价、支付失败/重试/取消、成功租借、刷新恢复、归还/历史、后台 TEST 标识、重复点击与断网重试、数据库重开、不同用户隔离、CSRF/Origin 拒绝、关闭开关撤销会话。真实扫码设备、Google OAuth、PVS 收费和 WsCharge 柜机联调仍需另行验收。

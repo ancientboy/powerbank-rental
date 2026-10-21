@@ -1,3 +1,4 @@
+import { handleTestRental, testRentals, testPayments, testStations } from './production-test-rental.mjs';
 import { randomBytes, createHash, randomUUID } from "node:crypto";
 import {
   verifyPassword,
@@ -162,7 +163,7 @@ export function createProductionAPI({
           fail(400, "Invalid request");
       }
       if (path === "/health" && method === "GET")
-        return json({ status: "ok", mode: "production", schemaVersion: 2 });
+        return json({ status: "ok", mode: "production", schemaVersion: 3 });
       if (path === "/api/admin/login" && method === "POST") {
         const username = text(body.username, 100).toLowerCase();
         rate("admin-global", 60, 15 * 60000);
@@ -231,6 +232,9 @@ export function createProductionAPI({
                 "SELECT id,email,name,created_at,'google' AS provider,0 AS isTest FROM users UNION ALL SELECT id,NULL AS email,name,created_at,'google_test' AS provider,1 AS isTest FROM test_users ORDER BY created_at DESC LIMIT 1000",
               )
               .all(),
+            testRentals: testRentals(db),
+            testPayments: testPayments(db),
+            testStations: googleTestEnabled(config) ? testStations : [],
             rentals: listRecords(db, "rental"),
             payments: listRecords(db, "payment"),
             support: listRecords(db, "support"),
@@ -498,6 +502,12 @@ export function createProductionAPI({
       if (path.startsWith("/api/user/")) {
         const s = requireSession(req, "user");
         if (method !== "GET") csrf(req, s);
+        if (path.startsWith('/api/user/test/')) {
+          if (!googleTestEnabled(config)) fail(404, 'Test rental flow is disabled');
+          if (!s.user.isTest) fail(403, 'This simulated flow requires a TEST account');
+          if (method !== 'GET') rate('test-rental:' + s.subject, 120, 60000);
+          return json(handleTestRental({ db, subject: s.subject, path, method, body, req, time: now() }));
+        }
         if (path === "/api/user/logout" && method === "POST") {
           db.prepare("DELETE FROM sessions WHERE token_hash=?").run(
             s.token_hash,
@@ -507,7 +517,7 @@ export function createProductionAPI({
           });
         }
         if (path === "/api/user/rentals" && method === "GET")
-          return json({ rentals: listRecords(db, "rental", s.subject) });
+          return json({ rentals: s.user.isTest ? testRentals(db, s.subject) : listRecords(db, "rental", s.subject) });
         if (path === "/api/user/support" && method === "GET")
           return json({ support: listRecords(db, "support", s.subject) });
         if (path === "/api/user/support" && method === "POST") {
