@@ -90,10 +90,21 @@ export function putRecord(db, kind, id, data, owner = null) {
     "INSERT INTO records(kind,id,owner_id,data) VALUES(?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data,owner_id=excluded.owner_id",
   ).run(kind, id, owner, JSON.stringify(data));
 }
-export function recordAudit(db, actor, action, target, now = Date.now()) {
-  db.prepare(
+export function recordAudit(db, actor, action, target, now = Date.now(), changes = null) {
+  const result = db.prepare(
     "INSERT INTO audit(actor,action,target,created_at) VALUES(?,?,?,?)",
   ).run(actor, action, target, new Date(now).toISOString());
+  // Explicit field allowlists prevent credentials, messages and arbitrary payloads entering audit.
+  const fields = {
+    'station.save': ['id','name','address','cabinetId','latitude','longitude','active','updatedAt'],
+    'pricing.update': ['currency','hourlyRate','dailyCap','deposit','version','updatedAt'],
+    'support.update': ['id','status','rentalId','testOnly','updatedAt'],
+  }[action];
+  if (changes && fields) {
+    const safe = value => value == null ? null : Object.fromEntries(fields.filter(k => Object.hasOwn(value, k) && (value[k] === null || ['string','number','boolean'].includes(typeof value[k]))).map(k => [k,value[k]]));
+    putRecord(db, 'audit_detail', String(result.lastInsertRowid), { before: safe(changes.before), after: safe(changes.after) });
+  }
+  return Number(result.lastInsertRowid);
 }
 export function transaction(db, fn) {
   db.exec("BEGIN IMMEDIATE");

@@ -1,3 +1,5 @@
+import { integrationView, applyIntegrationScenario, resolveIntegrationException, reconcileIntegrationRun, retryIntegrationRefund } from './production-integrations.mjs';
+import { supportView, auditView, pricingHistory, operationQueue, orderResponse } from './production-operations.mjs';
 import { handleTestRental, testRentals, testPayments, testStations, estimateTestRental } from './production-test-rental.mjs';
 import { randomBytes, createHash, randomUUID } from "node:crypto";
 import {
@@ -224,12 +226,42 @@ export function createProductionAPI({
             "Set-Cookie": cookie("admin", "", 0),
           });
         }
+        if (method === 'POST' && /^\/api\/admin\/integrations\/runs\/[^/]+\/retry-refund$/.test(path)) {
+          if (!['owner','operator'].includes(s.user.role)) fail(403, 'Your role cannot perform this action');
+          if (Object.keys(body).length) fail(400, 'No refund retry body fields are accepted');
+          rate('write:' + s.subject, 120, 60000);
+          return json(await retryIntegrationRefund(db, { runId: decodeURIComponent(path.split('/')[5]), idempotencyKey: req.headers.get('idempotency-key'), actor: { id: s.subject, role: s.user.role }, now: now() }));
+        }
+        if (method === 'POST' && /^\/api\/admin\/integrations\/runs\/[^/]+\/reconcile$/.test(path)) {
+          if (!['owner','operator'].includes(s.user.role)) fail(403, 'Your role cannot perform this action');
+          if (Object.keys(body).length) fail(400, 'No reconciliation body fields are accepted');
+          rate('write:' + s.subject, 120, 60000);
+          return json(await reconcileIntegrationRun(db, { runId: decodeURIComponent(path.split('/')[5]), idempotencyKey: req.headers.get('idempotency-key'), actor: { id: s.subject, role: s.user.role }, now: now() }));
+        }
+        if (path === '/api/admin/integrations' && method === 'GET') return json(integrationView(db, now()));
+        if (method === 'POST' && (path === '/api/admin/integrations/scenarios' || /^\/api\/admin\/integrations\/exceptions\/[^/]+\/resolve$/.test(path))) {
+          if (!['owner','operator'].includes(s.user.role)) fail(403, 'Your role cannot perform this action');
+          rate('write:' + s.subject, 120, 60000);
+          const actor = { id: s.subject, role: s.user.role };
+          if (path.endsWith('/scenarios')) {
+            if (Object.keys(body).some(k => k !== 'scenario')) fail(400, 'Only a scenario may be provided');
+            return json(applyIntegrationScenario(db, { scenario: body.scenario, idempotencyKey: req.headers.get('idempotency-key'), actor, now: now() }));
+          }
+          if (Object.keys(body).some(k => k !== 'note')) fail(400, 'Only a resolution note may be provided');
+          return json(resolveIntegrationException(db, { exceptionId: decodeURIComponent(path.split('/')[5]), note: body.note, actor, now: now() }));
+        }
+        if (path === "/api/admin/orders" && method === "GET") return json(orderResponse(db, u, now()));
+        if (path.startsWith("/api/admin/orders/") && method === "GET") return json(orderResponse(db, u, now(), decodeURIComponent(path.slice("/api/admin/orders/".length))));
         if (path === "/api/admin/dashboard" && method === "GET")
           return json({
+            counts: {
+              liveUsers: Number(db.prepare('SELECT count(*) AS n FROM users').get().n),
+              testUsers: Number(db.prepare('SELECT count(*) AS n FROM test_users').get().n),
+            },
             stations: listRecords(db, "station"),
             users: db
               .prepare(
-                "SELECT id,email,name,created_at,'google' AS provider,0 AS isTest FROM users UNION ALL SELECT id,NULL AS email,name,created_at,'google_test' AS provider,1 AS isTest FROM test_users ORDER BY created_at DESC LIMIT 1000",
+                "SELECT id,email,name,created_at,'google' AS provider,0 AS isTest FROM users UNION ALL SELECT id,NULL AS email,name,created_at,'google_test' AS provider,1 AS isTest FROM test_users ORDER BY created_at DESC",
               )
               .all(),
             serverNow: new Date(now()).toISOString(),
@@ -238,10 +270,10 @@ export function createProductionAPI({
             testStations: googleTestEnabled(config) ? testStations : [],
             rentals: listRecords(db, "rental"),
             payments: listRecords(db, "payment"),
-            support: listRecords(db, "support"),
-            audit: db
-              .prepare("SELECT * FROM audit ORDER BY id DESC LIMIT 200")
-              .all(),
+            support: listRecords(db, "support").map(supportView),
+            workQueue: operationQueue(db),
+            pricingHistory: pricingHistory(db, pricing()),
+            audit: auditView(db),
             pricing: pricing(),
             readiness: readiness(config),
           });
@@ -311,7 +343,7 @@ export function createProductionAPI({
               fail(409, "Cabinet already assigned");
             transaction(db, () => {
               putRecord(db, "station", id, station);
-              recordAudit(db, s.subject, "station.save", id, now());
+              recordAudit(db, s.subject, "station.save", id, now(), { before: existing, after: station });
             });
             return json({ station });
           }
@@ -324,7 +356,7 @@ export function createProductionAPI({
               dailyCap: Number(body.dailyCap),
               deposit: Number(body.deposit),
               version: randomUUID(),
-              updatedAt: new Date(now()).toISOString(),
+              updatedAt: new Date(Math.max(now(), (Date.parse(pricing()?.updatedAt) || 0) + 1)).toISOString(),
             };
             if (
               body.currency !== "ARS" ||
@@ -337,11 +369,14 @@ export function createProductionAPI({
                 400,
                 "Prices must be positive integer minor units; daily cap must cover one hour",
               );
+            const before = pricing();
             transaction(db, () => {
+              if (before?.version) putRecord(db, "pricing_history", before.version, before);
+              putRecord(db, "pricing_history", p.version, p);
               db.prepare(
                 "INSERT INTO settings VALUES('pricing',?) ON CONFLICT(key) DO UPDATE SET data=excluded.data",
               ).run(JSON.stringify(p));
-              recordAudit(db, s.subject, "pricing.update", p.version, now());
+              recordAudit(db, s.subject, "pricing.update", p.version, now(), { before, after: p });
             });
             return json({ pricing: p });
           }
@@ -355,13 +390,16 @@ export function createProductionAPI({
           if (typeof body.reply === "string" && body.reply.trim().length > 4000)
             fail(400, "Support reply must be at most 4000 characters");
           const reply = text(body.reply, 4000);
-          if (body.status === "resolved" && !reply) fail(400, "Provide a reply before resolving the support case");
+          if (body.status === "resolved" && !reply && !ticket.reply && !supportView(ticket).replies.some(r => r.actorRole !== "customer" && r.reply)) fail(400, "Provide a reply before resolving the support case");
+          const before = { ...ticket };
+          ticket.replies = supportView(ticket).replies;
           ticket.status = body.status;
-          ticket.reply = reply;
+          if (reply) ticket.reply = reply;
           ticket.updatedAt = new Date(Math.max(now(), (Date.parse(ticket.updatedAt) || 0) + 1)).toISOString();
+          if (reply) ticket.replies.push({ id: randomUUID(), reply, createdAt: ticket.updatedAt, actorId: s.subject, actorRole: s.user.role });
           transaction(db, () => {
             putRecord(db, "support", id, ticket, ticket.userId);
-            recordAudit(db, s.subject, "support.update", id, now());
+            recordAudit(db, s.subject, "support.update", id, now(), { before, after: ticket });
           });
           return json({ support: ticket });
         }
@@ -534,14 +572,50 @@ export function createProductionAPI({
         }
         if (path === "/api/user/rentals" && method === "GET")
           return json({ serverNow: new Date(now()).toISOString(), rentals: s.user.isTest ? testRentals(db, s.subject).map(r => estimateTestRental(r, now())) : listRecords(db, "rental", s.subject) });
+        if (path === '/api/user/support/reply' && method === 'POST') {
+          if (typeof body.id !== 'string' || body.id.length > 160) fail(400, 'Invalid support reference');
+          if (typeof body.message !== 'string' || body.message.trim().length < 5 || body.message.trim().length > 4000) fail(400, 'Support message must be 5–4000 characters');
+          const message = body.message.trim();
+          const key = req.headers.get('idempotency-key');
+          if (!key || !/^[a-zA-Z0-9_-]{8,128}$/.test(key)) fail(400, 'Provide an Idempotency-Key (8–128 letters, numbers, _ or -)');
+          const receiptId = digest(s.subject + '\n' + key);
+          const result = transaction(db, () => {
+            const row = db.prepare("SELECT data FROM records WHERE kind='support' AND id=? AND owner_id=?").get(body.id, s.subject);
+            if (!row) fail(404, 'Support case not found');
+            const ticket = supportView(JSON.parse(row.data));
+            if ((ticket.testOnly === true) !== (s.user.isTest === true)) fail(404, 'Support case not found');
+            const prior = db.prepare("SELECT data FROM records WHERE kind='support_reply_request' AND id=? AND owner_id=?").get(receiptId, s.subject);
+            const fingerprint = digest(body.id + '\n' + message);
+            if (prior) {
+              if (JSON.parse(prior.data).fingerprint !== fingerprint) fail(409, 'Idempotency key already used for a different support reply');
+              return ticket;
+            }
+            rate('support-reply:' + s.subject, 30, 3600000);
+            ticket.updatedAt = new Date(Math.max(now(), (Date.parse(ticket.updatedAt) || 0) + 1)).toISOString();
+            ticket.replies.push({ id: randomUUID(), reply: message, createdAt: ticket.updatedAt, actorId: s.subject, actorRole: 'customer' });
+            if (ticket.status === 'resolved') ticket.status = 'open';
+            putRecord(db, 'support', ticket.id, ticket, s.subject);
+            putRecord(db, 'support_reply_request', receiptId, { fingerprint }, s.subject);
+            return ticket;
+          });
+          return json({ support: result });
+        }
         if (path === "/api/user/support" && method === "GET")
-          return json({ support: listRecords(db, "support", s.subject) });
+          return json({ support: listRecords(db, "support", s.subject).map(supportView) });
         if (path === "/api/user/support" && method === "POST") {
           if (typeof body.message === "string" && body.message.trim().length > 4000)
             fail(400, "Support message must be at most 4000 characters");
           const message = text(body.message, 4000);
           if (message.length < 5)
             fail(400, "Please describe the issue in at least five characters");
+          if (body.rentalId != null && (typeof body.rentalId !== 'string' || body.rentalId.length > 160)) fail(400, 'Invalid rental reference');
+          const rentalId = typeof body.rentalId === 'string' ? body.rentalId.trim() || null : null;
+          if (rentalId) {
+            const linked = s.user.isTest
+              ? db.prepare('SELECT id FROM test_rentals WHERE id=? AND owner_id=?').get(rentalId, s.subject)
+              : db.prepare("SELECT id FROM records WHERE kind='rental' AND id=? AND owner_id=?").get(rentalId, s.subject);
+            if (!linked) fail(404, 'Rental not found');
+          }
           const key = req.headers.get("idempotency-key");
           if (key !== null && !/^[a-zA-Z0-9_-]{8,128}$/.test(key))
             fail(400, "Provide an Idempotency-Key (8–128 letters, numbers, _ or -)");
@@ -550,8 +624,8 @@ export function createProductionAPI({
           const previous = db.prepare("SELECT data FROM records WHERE kind='support' AND id=? AND owner_id=?").get(id, s.subject);
           if (previous) {
             const ticket = JSON.parse(previous.data);
-            if (ticket.message !== message) fail(409, "Idempotency key already used for a different support request");
-            return json({ support: ticket }, 201);
+            if (ticket.message !== message || (ticket.rentalId || null) !== rentalId) fail(409, "Idempotency key already used for a different support request");
+            return json({ support: supportView(ticket) }, 201);
           }
           rate("support:" + s.subject, 10, 3600000);
           const ticket = {
@@ -559,12 +633,14 @@ export function createProductionAPI({
             id,
             userId: s.subject,
             message,
+            rentalId,
+            replies: [],
             status: "open",
             reply: "",
             createdAt: new Date(now()).toISOString(),
           };
           putRecord(db, "support", ticket.id, ticket, s.subject);
-          return json({ support: ticket }, 201);
+          return json({ support: supportView(ticket) }, 201);
         }
         if (
           ["/api/user/rent", "/api/user/pay", "/api/user/return"].includes(path)

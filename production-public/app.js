@@ -4,6 +4,7 @@ let session = { user: null, readiness: {} };
 let testState = null, quote = null, busy = false, clockOffset = 0, cameraStream = null, cameraTimer = null, sheetOpener = null;
 const operationKeys = new Map();
 let stateVersion = 0, stationVersion = 0, memberVersion = 0, supportBusy = false, supportAttempt = null, refreshing = false;
+let supportRentalId = null, supportTicketId = null, supportDraft = null, supportContext = null;
 let navigationVersion = 0, afterLogin = 'home', scanAfterLogin = false, paymentMethod = 'card';
 let view = 'home', stationData = { stations: [], pricing: null };
 const screens = { home: 'home-screen', stations: 'stations', history: 'member-area', profile: 'account', support: 'support-screen', scan: 'rental-home' };
@@ -56,10 +57,80 @@ function refreshHome() {
   $('home-pricing-note').textContent = session.user?.isTest ? 'Test pricing only. No real charge.' : (!session.user && session.readiness?.googleTest?.ready) ? 'Sign in to try a test rental. You won’t be charged.' : 'Real rentals are not yet available.';
 }
 const el = (tag, text, cls) => { const n = document.createElement(tag); if (text != null) n.textContent = text; if (cls) n.className = cls; return n; };
+function supportOwner(user = session.user) { return user?.id ? `${user.isTest ? 'test' : 'live'}:${user.id}` : null; }
+function saveSupportDraft() {
+  const owner = supportOwner(); if (!owner) return;
+  supportDraft = { owner, message: $('support-message').value, rentalId: supportRentalId, ticketId: supportTicketId, at: Date.now() };
+  try { globalThis.sessionStorage?.setItem('voltgo-support-draft', JSON.stringify(supportDraft)); } catch { /* In-memory recovery still works. */ }
+}
+function forgetSupportDraft() {
+  supportDraft = null;
+  try { globalThis.sessionStorage?.removeItem('voltgo-support-draft'); } catch { /* Storage is optional. */ }
+}
+function restoreSupportDraft() {
+  const owner = supportOwner(); if (!owner) return;
+  if (!supportDraft) { try { supportDraft = JSON.parse(globalThis.sessionStorage?.getItem('voltgo-support-draft') || 'null'); } catch { forgetSupportDraft(); } }
+  if (supportDraft) {
+    if (supportDraft.owner === owner && Date.now() - supportDraft.at >= 0 && Date.now() - supportDraft.at < 30 * 60 * 1000) {
+      $('support-message').value = typeof supportDraft.message === 'string' ? supportDraft.message.slice(0, 2000) : '';
+      supportRentalId = typeof supportDraft.rentalId === 'string' ? supportDraft.rentalId : null;
+      supportTicketId = typeof supportDraft.ticketId === 'string' ? supportDraft.ticketId : null;
+    } else { $('support-message').value = ''; supportRentalId = null; supportTicketId = null; forgetSupportDraft(); }
+  }
+  renderSupportContext();
+}
+function renderSupportContext() {
+  if (!supportContext) { supportContext = el('div', null, 'service-note'); supportContext.setAttribute('aria-live', 'polite'); $('support-form').append(supportContext); }
+  supportContext.replaceChildren();
+  const label = el('p', supportRentalId ? `${session.user?.isTest ? 'TEST' : 'LIVE'} rental reference: ${supportRentalId}` : 'General help · No rental linked');
+  label.style.overflowWrap = 'anywhere'; supportContext.append(label);
+  if (supportTicketId) { const ticket = el('p', `Replying to support case: ${supportTicketId}`); ticket.style.overflowWrap = 'anywhere'; supportContext.append(ticket, action('Start a new support case', () => { supportTicketId = null; supportAttempt = null; saveSupportDraft(); renderSupportContext(); }, 'secondary small')); }
+  if (supportRentalId && !supportTicketId) supportContext.append(action('Clear rental link', () => { supportRentalId = null; supportAttempt = null; saveSupportDraft(); renderSupportContext(); }, 'secondary small'));
+}
+function supportForRental(rental) {
+  if (!session.user || !rental?.id) return;
+  supportRentalId = rental.id; supportTicketId = null; supportAttempt = null; saveSupportDraft(); renderSupportContext(); navigate('support'); $('support-message').focus();
+}
+function renderSupportHistory(tickets) {
+  const history = $('support-history'); history.replaceChildren();
+  for (const ticket of tickets) {
+    const card = el('article', null, 'ticket'); card.style.overflowWrap = 'anywhere';
+    card.append(el('span', ticket.status || 'Open', 'badge'));
+    if (ticket.rentalId) card.append(el('p', `${session.user?.isTest ? 'TEST' : 'LIVE'} rental reference: ${ticket.rentalId}`, 'subtle'));
+    card.append(el('p', ticket.message));
+    const replies = Array.isArray(ticket.replies) && ticket.replies.length ? ticket.replies : ticket.reply ? [{ reply: ticket.reply }] : [];
+    for (const reply of replies) {
+      card.append(el('strong', reply.actorRole === 'customer' ? 'You' : 'voltgo support'), el('p', reply.reply));
+      const at = Date.parse(reply.createdAt);
+      if (Number.isFinite(at)) card.append(el('p', new Date(at).toLocaleString(), 'subtle'));
+    }
+    if (ticket.id) {
+      let replyForm = null;
+      const openReply = () => {
+        if (replyForm) { replyForm.querySelector('textarea')?.focus(); return; }
+        if (supportTicketId !== ticket.id) supportAttempt = null;
+        supportTicketId = ticket.id; supportRentalId = ticket.rentalId || null;
+        saveSupportDraft(); renderSupportContext();
+        replyForm = el('form'); const input = el('textarea'); input.value = $('support-message').value; input.required = true; input.minLength = 5; input.maxLength = 2000; input.rows = 3;
+        input.setAttribute('aria-label', 'Your follow-up message');
+        const send = el('button', 'Send follow-up', 'button secondary small'); send.type = 'submit';
+        input.addEventListener('input', () => { supportTicketId = ticket.id; supportRentalId = ticket.rentalId || null; $('support-message').value = input.value; saveSupportDraft(); renderSupportContext(); });
+        const status = el('p', '', 'form-status'); status.setAttribute('role', 'status'); replyForm.supportStatus = status;
+        replyForm.append(input, send, status);
+        replyForm.addEventListener('submit', event => { supportTicketId = ticket.id; supportRentalId = ticket.rentalId || null; $('support-message').value = input.value; saveSupportDraft(); return sendSupportMessage(event); });
+        card.append(replyForm); input.focus();
+      };
+      card.append(action('Reply to this case', openReply, 'secondary small'));
+      if (supportTicketId === ticket.id) openReply();
+    }
+    history.append(card);
+  }
+}
 function clearMemberState(preserveDraft = false) {
   testState = null; quote = null; stateVersion++; memberVersion++; stationVersion++; operationKeys.clear();
   supportAttempt = null; paymentMethod = 'card'; scanAfterLogin = false; closeSheet();
-  if (!preserveDraft) $('support-message').value = ''; $('support-status').textContent = ''; $('support-history').replaceChildren(); $('rental-flow').replaceChildren();
+  if (preserveDraft) saveSupportDraft(); else forgetSupportDraft();
+  if (!preserveDraft) { $('support-message').value = ''; supportRentalId = null; supportTicketId = null; } renderSupportContext(); $('support-status').textContent = ''; $('support-history').replaceChildren(); $('rental-flow').replaceChildren();
 }
 async function api(path, options = {}) {
   const member = session.user;
@@ -86,6 +157,7 @@ function renderStations() {
     $('pricing').textContent = data.pricing ? `${isTest ? 'Test' : 'Planned'} pricing: ${money(data.pricing.hourlyRate, data.pricing.currency)} / hour · ${money(data.pricing.dailyCap, data.pricing.currency)} daily cap · ${money(data.pricing.deposit, data.pricing.currency)} deposit. ${isTest ? 'No real charge.' : 'Rentals are not yet available.'}` : '';
 }
 function account() {
+  restoreSupportDraft();
   const testExperience = Boolean(session.user?.isTest || (!session.user && session.readiness?.googleTest?.ready));
   $('experience-label').textContent = testExperience ? 'TEST EXPERIENCE' : 'CHARGE ON THE GO';
   $('experience-detail').textContent = testExperience ? '· No real charges or physical devices.' : '· Real rentals are not yet available.';
@@ -134,10 +206,10 @@ async function memberData() {
     else rentals.append(empty('Your test rentals could not be loaded.', 'Refresh to try again.'), action('Try again', memberData));
   }
   else if (results[0].status === 'rejected') rentals.append(el('p', 'Your rentals could not be loaded. Please refresh the page.'));
-  else { const rows = results[0].value.rentals || []; if (!rows.length) rentals.append(empty('No rentals yet', 'Real rentals are unavailable.')); for (const rental of rows) { const row = el('div', null, 'integration'); row.append(el('strong', rental.stationName || rental.stationId || 'Rental'), el('span', rental.status || 'Unknown', 'badge')); rentals.append(row); } }
+  else { const rows = results[0].value.rentals || []; if (!rows.length) rentals.append(empty('No rentals yet', 'Real rentals are unavailable.')); for (const rental of rows) { const row = el('div', null, 'integration'); row.append(el('strong', rental.stationName || rental.stationId || 'Rental'), el('span', rental.status || 'Unknown', 'badge'), action('Get help with rental', () => supportForRental(rental), 'secondary small')); rentals.append(row); } }
   const support = $('support-history'); support.replaceChildren();
   if (results[1].status === 'rejected') support.append(el('p', 'Your support history could not be loaded.'));
-  else for (const ticket of results[1].value.support || []) { const card = el('article', null, 'ticket'); card.append(el('span', ticket.status || 'Open', 'badge'), el('p', ticket.message)); if (ticket.reply) card.append(el('strong', 'voltgo support'), el('p', ticket.reply)); support.append(card); }
+  else renderSupportHistory(results[1].value.support || []);
 }
 function action(label, handler, style = 'dark') {
   const button = el('button', label, `button ${style}`); button.type = 'button'; button.disabled = busy;
@@ -282,6 +354,7 @@ function renderHistory(rows) {
     if (['active', 'pending_payment', 'awaiting_pickup'].includes(rental.status)) row.append(action('View current rental', () => navigate('scan'), 'secondary small'));
     if (rental.depositPaid > 0) row.append(el('span', `Test deposit: ${money(rental.depositPaid, rental.pricing?.currency)}`));
     if (rental.status === 'completed' || rental.status === 'cancelled') { row.append(el('strong', `Rental fee: ${money(rental.totalAmount, rental.pricing?.currency)}`), el('span', rental.legacy ? 'Legacy rental · no deposit collected' : `Test refund: ${money(rental.refundAmount || 0, rental.pricing?.currency)} · ${settlementLabel(rental)}`), action('View receipt', () => showReceipt(rental), 'secondary small')); }
+    row.append(action('Get help with rental', () => supportForRental(rental), 'secondary small'));
     if (rental.createdAt) row.append(el('span', new Date(rental.createdAt).toLocaleString(), 'subtle')); list.append(row);
   }
 }
@@ -328,7 +401,8 @@ function showReceipt(rental) {
     ['Refund / settlement status', rental.legacy ? 'Legacy · no deposit collected' : settlementLabel(rental)],
     ...(rental.outstandingAmount > 0 ? [['Balance due', money(rental.outstandingAmount, rental.pricing?.currency)]] : []),
     ['Real charge', money(0, rental.pricing?.currency)]
-  ]) { const row = el('div'); row.append(el('span', label), el('strong', value)); details.append(row); }
+  ]) { const row = el('div'); const content = el('strong', value); content.style.overflowWrap = 'anywhere'; content.style.minWidth = '0'; row.append(el('span', label), content); details.append(row); }
+  sheet.append(action('Get help with rental', () => supportForRental(rental), 'secondary small'));
   sheet.append(details, el('p', rental.legacy ? 'Legacy test rental: original rates preserved. No deposit was collected or refunded, and no additional payment was charged.' : 'Mock settlement only. No physical return or real payment occurred.', 'subtle'));
 }
 function confirmReturn(rental) {
@@ -369,23 +443,25 @@ window.addEventListener('hashchange', () => { const next = String(location.hash 
 window.addEventListener('popstate', closeSheet);
 $('refresh-history').addEventListener('click', memberData);
 $('refresh-stations').addEventListener('click', stations);
-$('support-form').addEventListener('submit', async event => {
+$('support-message').addEventListener('input', saveSupportDraft);
+async function sendSupportMessage(event) {
   event.preventDefault();
   if (supportBusy || !session.user) return;
-  const button = event.currentTarget.querySelector('button'), member = session.user;
-  const message = $('support-message').value.trim();
-  if (message.length < 5 || message.length > 2000) { $('support-status').textContent = 'Please enter between 5 and 2,000 characters.'; return; }
-  if (!supportAttempt || supportAttempt.message !== message || supportAttempt.member !== member) supportAttempt = { message, member, key: crypto.randomUUID() };
-  supportBusy = true; button.disabled = true; $('support-status').textContent = 'Sending…';
+  const button = event.currentTarget.querySelector('button'), member = session.user, status = event.currentTarget.supportStatus || $('support-status');
+  const message = $('support-message').value.trim(), rentalId = supportRentalId, ticketId = supportTicketId;
+  if (message.length < 5 || message.length > 2000) { status.textContent = 'Please enter between 5 and 2,000 characters.'; return; }
+  if (!supportAttempt || supportAttempt.message !== message || supportAttempt.member !== member || supportAttempt.rentalId !== rentalId || supportAttempt.ticketId !== ticketId) supportAttempt = { message, rentalId, ticketId, member, key: crypto.randomUUID() };
+  supportBusy = true; button.disabled = true; status.textContent = 'Sending…';
   try {
-    await api('/api/user/support', { method: 'POST', headers: { 'Idempotency-Key': supportAttempt.key }, body: JSON.stringify({ message }) });
+    await api(ticketId ? '/api/user/support/reply' : '/api/user/support', { method: 'POST', headers: { 'Idempotency-Key': supportAttempt.key }, body: JSON.stringify(ticketId ? { id: ticketId, message } : { message, rentalId }) });
     if (session.user !== member) return;
     supportAttempt = null;
-    if ($('support-message').value.trim() === message) $('support-message').value = '';
-    $('support-status').textContent = 'Message sent.'; await memberData();
-  } catch (error) { if (session.user === member) $('support-status').textContent = error.status ? error.message : 'We could not confirm delivery. Retry to safely check and send this message once.'; }
+    if ($('support-message').value.trim() === message && supportRentalId === rentalId && supportTicketId === ticketId) { $('support-message').value = ''; supportRentalId = null; supportTicketId = null; forgetSupportDraft(); renderSupportContext(); } else saveSupportDraft();
+    status.textContent = 'Message sent.'; await memberData();
+  } catch (error) { if (session.user === member) status.textContent = error.status ? error.message : 'We could not confirm delivery. Retry to safely check and send this message once.'; }
   finally { supportBusy = false; button.disabled = false; }
-});
+}
+$('support-form').addEventListener('submit', sendSupportMessage);
 async function refreshSession() {
   if (refreshing || busy || supportBusy) return;
   refreshing = true;
@@ -395,7 +471,7 @@ async function refreshSession() {
     if (session !== previous) return;
     if (next.user?.id !== session.user?.id || next.csrf !== session.csrf) {
       const previousView = view;
-      clearMemberState(!next.user || next.user.id === session.user?.id); session = next; account();
+      clearMemberState(!session.user || !next.user || next.user.id === session.user?.id); session = next; account();
       if (!session.user && ['scan', 'support'].includes(previousView)) { afterLogin = previousView; navigate('profile'); }
     }
     await memberData(); await stations();

@@ -136,3 +136,10 @@ API（仅 TEST 会话，所有响应 Cache-Control:no-store）：
 后台站点和工单保存可带 expectedUpdatedAt，价格保存可带 expectedVersion。当前前端附带加载时的值；若记录已变更，服务返回 409，需重新加载并核对后再编辑。旧客户端不带令牌的调用保持兼容，因此接入自定义管理客户端时也应发送令牌。
 
 客户订单列表和后台 TEST 进行中订单金额使用服务器时间动态估算，已结算订单不重新计算。客户端恢复焦点时会同步会话和订单；模拟押金和退款仍不连接真实支付服务。
+
+
+## 12. 后台运营与独立模拟联调
+
+本轮继续沿用 schema v4。新增订单详情/筛选、工作队列、关联客服及双向回复历史、计价历史和安全操作差异记录；新增记录沿用独立 records kind，旧客服单条回复以 legacy 历史展示，不伪造过去已被覆盖的内容。
+
+使用说明见 [ADMIN-OPERATIONS.md](ADMIN-OPERATIONS.md)。联调实验与客户 TEST 租借、正式资金分离，必须明确进入 TEST 场景；接入契约及未实现的真实链路见 [VENDOR-ADAPTER-CONTRACT.md](VENDOR-ADAPTER-CONTRACT.md)。不能因为模拟回归通过就打开真实收费或机柜操作。

@@ -7,7 +7,7 @@
     "test": "node --test tests/*.test.mjs",
     "build": "node scripts/build.mjs",
     "dev": "node scripts/start.mjs",
-    "check": "node --check src/domain.mjs && node --check src/api.mjs && node --check public/app.js && node --check src/wscharge.mjs && node --check src/production-test-rental.mjs && node --check src/production-api.mjs && node --check src/production-store.mjs && node --check src/production-config.mjs && node --check src/production-google.mjs && node --check scripts/start.mjs && node --check scripts/admin.mjs && node --check production-public/app.js && node --check production-public/admin.js && node --check scripts/backup.mjs",
+    "check": "node --check src/domain.mjs && node --check src/api.mjs && node --check public/app.js && node --check src/wscharge.mjs && node --check src/production-test-rental.mjs && node --check src/production-api.mjs && node --check src/production-store.mjs && node --check src/production-config.mjs && node --check src/production-google.mjs && node --check scripts/start.mjs && node --check scripts/admin.mjs && node --check production-public/app.js && node --check production-public/admin.js && node --check scripts/backup.mjs && node --check src/production-operations.mjs && node --check src/production-integrations.mjs",
     "verify:build": "node scripts/verify-build.mjs",
     "start": "node scripts/start.mjs",
     "admin": "node scripts/admin.mjs",

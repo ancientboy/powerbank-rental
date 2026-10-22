@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 const root = new URL('../production-public/', import.meta.url);
 class Element {
-  constructor(tag = 'div') { this.tagName = tag; this.children = []; this.dataset = {}; this.events = {}; this.attributes = {}; this.value = ''; this.classList = { add() {}, remove() {}, toggle() {} }; }
+  constructor(tag = 'div') { this.tagName = tag; this.style = {}; this.children = []; this.dataset = {}; this.events = {}; this.attributes = {}; this.value = ''; this.classList = { add() {}, remove() {}, toggle() {} }; }
   append(...nodes) { this.children.push(...nodes); }
   prepend(...nodes) { this.children.unshift(...nodes); }
   replaceChildren(...nodes) { this.children = nodes; }
@@ -41,7 +41,8 @@ test('administrator session failure redirects to independent login', async () =>
 test('administrator login view does not fetch protected data', async () => { const h = await harness('admin.js', '/admin/login', {}); assert.equal(h.requests.length, 0); });
 test('admin dashboard renders all real-data sections and mutations include CSRF', async () => {
   const h = await harness('admin.js', '/admin', { '/api/admin/session': { user: { username: 'ops', role: 'owner' }, csrf: 'csrf-test' }, '/api/admin/dashboard': { stations: [], users: [], rentals: [], payments: [], support: [], audit: [], pricing: { hourlyRate: 12345 }, readiness: {} } });
-  assert.equal(h.elements.get('admin-nav').children.length, 9);
+  assert.deepEqual(h.elements.get('admin-nav').children.filter(node => node.tagName === 'a').map(node => node.dataset.section), ['dashboard', 'queue', 'stations', 'orders', 'payments', 'users', 'support', 'pricing', 'audit', 'integrations']);
+  assert.ok(h.elements.get('admin-nav').children.some(node => node.textContent === 'SETTINGS'));
   for (const section of ['stations', 'pricing', 'orders', 'payments', 'users', 'support', 'audit', 'integrations', 'dashboard']) vm.runInContext(`navigate('${section}')`, h.context);
   await vm.runInContext("api('/api/admin/stations', {method:'POST',body:'{}'})", h.context);
   assert.equal(h.requests.at(-1).options.headers['X-CSRF-Token'], 'csrf-test'); assert.equal(h.requests.at(-1).options.credentials, 'same-origin');
