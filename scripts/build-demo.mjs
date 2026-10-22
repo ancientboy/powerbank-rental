@@ -4,14 +4,16 @@ const out = new URL("dist/", root);
 await mkdir(new URL("server/", out), { recursive: true });
 await mkdir(new URL(".openai/", out), { recursive: true });
 const assets = {};
-for (const file of ["index.html", "app.js", "style.css"])
+for (const file of ["index.html", "app.js", "style.css", "smile-mark.svg"])
   assets["/" + file] = {
     body: await readFile(new URL("public/" + file, root), "utf8"),
     type: file.endsWith("html")
       ? "text/html; charset=utf-8"
       : file.endsWith("js")
         ? "text/javascript; charset=utf-8"
-        : "text/css; charset=utf-8",
+        : file.endsWith("svg")
+          ? "image/svg+xml"
+          : "text/css; charset=utf-8",
   };
 let bundle = "";
 for (const file of [

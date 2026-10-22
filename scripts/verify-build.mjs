@@ -8,6 +8,7 @@ for (const path of [
   "dist/production-public/index.html",
   "dist/production-public/customer.css",
   "dist/production-public/admin.html",
+  "dist/production-public/smile-mark.svg",
 ])
   await access(path);
 const pkg = JSON.parse(await readFile("dist/package.json", "utf8"));

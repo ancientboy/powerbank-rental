@@ -112,12 +112,11 @@ svg {
   align-items: center;
   gap: 6px;
 }
-.brand-bolt {
-  width: 18px;
-  height: 27px;
-  transform: rotate(8deg);
-  background: var(--lime);
-  clip-path: polygon(44% 0, 100% 0, 63% 39%, 96% 39%, 9% 100%, 37% 54%, 0 54%);
+.brand-mark {
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  display: block;
 }
 .nav {
   display: flex;

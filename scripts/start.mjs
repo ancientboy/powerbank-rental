@@ -22,6 +22,7 @@ const assets = new Map([
   ["/admin.js", "admin.js"],
   ["/production.css", "production.css"],
   ["/customer.css", "customer.css"],
+  ["/smile-mark.svg", "smile-mark.svg"],
 ]);
 const server = http.createServer(async (req, res) => {
   const headers = {
@@ -79,7 +80,9 @@ const server = http.createServer(async (req, res) => {
             ? "text/html; charset=utf-8"
             : filename.endsWith(".js")
               ? "text/javascript; charset=utf-8"
-              : "text/css; charset=utf-8",
+              : filename.endsWith(".svg")
+                ? "image/svg+xml"
+                : "text/css; charset=utf-8",
         },
       });
     } else response = new Response("Not found", { status: 404 });
@@ -101,7 +104,7 @@ server.requestTimeout = 15000;
 server.headersTimeout = 10000;
 server.listen(config.port, config.host, () =>
   console.log(
-    `voltgo production server listening on ${config.host}:${config.port}; external origin ${config.publicOrigin}`,
+    `Smile production server listening on ${config.host}:${config.port}; external origin ${config.publicOrigin}`,
   ),
 );
 for (const signal of ["SIGINT", "SIGTERM"])

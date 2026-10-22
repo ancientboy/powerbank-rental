@@ -100,7 +100,7 @@ function renderSupportHistory(tickets) {
     card.append(el('p', ticket.message));
     const replies = Array.isArray(ticket.replies) && ticket.replies.length ? ticket.replies : ticket.reply ? [{ reply: ticket.reply }] : [];
     for (const reply of replies) {
-      card.append(el('strong', reply.actorRole === 'customer' ? 'You' : 'voltgo support'), el('p', reply.reply));
+      card.append(el('strong', reply.actorRole === 'customer' ? 'You' : 'Smile support'), el('p', reply.reply));
       const at = Date.parse(reply.createdAt);
       if (Number.isFinite(at)) card.append(el('p', new Date(at).toLocaleString(), 'subtle'));
     }
@@ -161,7 +161,7 @@ function account() {
   const testExperience = Boolean(session.user?.isTest || (!session.user && session.readiness?.googleTest?.ready));
   $('experience-label').textContent = testExperience ? 'TEST EXPERIENCE' : 'CHARGE ON THE GO';
   $('experience-detail').textContent = testExperience ? '· No real charges or physical devices.' : '· Real rentals are not yet available.';
-  $('footer-label').textContent = testExperience ? '© 2026 voltgo · TEST EXPERIENCE' : '© 2026 voltgo';
+  $('footer-label').textContent = testExperience ? '© 2026 Smile · TEST EXPERIENCE' : '© 2026 Smile';
   $('home-mode-note').textContent = testExperience ? 'Test experience. No real payments or devices.' : 'Real rentals are not yet available.';
   $('home-scan-note').textContent = testExperience ? 'Try a test rental. No power bank is released.' : 'Explore stations. Real rentals are not yet available.';
   $('home-price-label').textContent = session.user?.isTest ? 'SIMPLE TEST PRICING' : 'PLANNED PRICING';

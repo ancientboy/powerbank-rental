@@ -119,7 +119,7 @@ test('inline follow-ups use existing case, reuse uncertain-send keys, and render
   const h=await harness();
   const ticket={id:'case-one',rentalId:'test-one',message:'First question',replies:[{reply:'Operator response',actorRole:'admin',createdAt:'2026-10-20T12:00:00Z'},{reply:'Customer follow-up',actorRole:'customer',createdAt:'2026-10-21T12:00:00Z'}]};
   h.run(`renderSupportHistory(${JSON.stringify([ticket])})`);
-  assert.match(text(h.elements.get('support-history')),/voltgo support Operator response.*You Customer follow-up/);
+  assert.match(text(h.elements.get('support-history')),/Smile support Operator response.*You Customer follow-up/);
   flat(h.elements.get('support-history')).find(n=>n.textContent==='Reply to this case').click();
   let form=flat(h.elements.get('support-history')).find(n=>n.tagName==='form'), input=form.querySelector('textarea');
   input.value='Please check the refund again';input.events.input();

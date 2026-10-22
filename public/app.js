@@ -166,10 +166,10 @@ function badge(status) {
   )}</span>`;
 }
 function header() {
-  return `<header class="header"><button class="brand" data-go="home" aria-label="voltgo home">voltgo<span class="brand-bolt"></span></button><nav class="nav" aria-label="Main"><button data-go="home" class="${view === "home" ? "current" : ""}">Rent a power bank</button><button data-go="stations" class="${view === "stations" ? "current" : ""}">Find a station</button><button data-go="history" class="${view === "history" ? "current" : ""}">My rentals</button><button data-go="support">Get help</button></nav><button class="avatar" data-go="profile" aria-label="Your account">${state.user ? esc(state.user.name?.charAt(0) || "D") : icon("user")}</button></header>`;
+  return `<header class="header"><button class="brand" data-go="home" aria-label="Smile home"><img class="brand-mark" src="/smile-mark.svg" alt="" width="38" height="38">Smile</button><nav class="nav" aria-label="Main"><button data-go="home" class="${view === "home" ? "current" : ""}">Rent a power bank</button><button data-go="stations" class="${view === "stations" ? "current" : ""}">Find a station</button><button data-go="history" class="${view === "history" ? "current" : ""}">My rentals</button><button data-go="support">Get help</button></nav><button class="avatar" data-go="profile" aria-label="Your account">${state.user ? esc(state.user.name?.charAt(0) || "D") : icon("user")}</button></header>`;
 }
 function footer() {
-  return `<footer class="footer"><span>© 2026 voltgo · Sample brand</span><div class="footer-links"><button data-modal="terms">Demo terms</button><button data-modal="privacy">Privacy</button><button data-go="guide">Demo guide</button><button data-go="admin">Operations ↗</button></div></footer><nav class="mobile-bottom" aria-label="Mobile navigation">${[
+  return `<footer class="footer"><span>© 2026 Smile · Demo experience</span><div class="footer-links"><button data-modal="terms">Demo terms</button><button data-modal="privacy">Privacy</button><button data-go="guide">Demo guide</button><button data-go="admin">Operations ↗</button></div></footer><nav class="mobile-bottom" aria-label="Mobile navigation">${[
     ["home", "scan", "Rent"],
     ["stations", "pin", "Stations"],
     ["history", "history", "Rentals"],
@@ -530,7 +530,7 @@ function render() {
   };
   app.innerHTML = `<div class="layout">${header()}<main>${(pages[view] || home)()}</main>${footer()}</div>`;
   enhanceSelects(app);
-  document.title = `voltgo · ${view === "home" ? "Scan. Charge. Go." : view.charAt(0).toUpperCase() + view.slice(1)}`;
+  document.title = `Smile · ${view === "home" ? "Scan. Charge. Go." : view.charAt(0).toUpperCase() + view.slice(1)}`;
 }
 const scenarioOptions = {
   payment: [
@@ -691,7 +691,7 @@ function infoModal(type) {
   if (type === "terms")
     modal(
       "Demo rental terms",
-      "<p>This is a functional demonstration, not a live rental service. voltgo is a sample brand. All stations, accounts, payments and device events are simulated.</p><p>Test pricing is shown before each rental. Billing starts only after simulated device pickup evidence is accepted and stops after simulated return evidence is accepted. Each started hour is charged using the stored test pricing version, subject to the displayed cap.</p><p>The test deposit is not real money. A return can be confirmed while a simulated refund is still processing. No actual payment, refund timing or physical service is promised.</p><p>Production pricing, legal terms, real identity providers, PVS and hardware are not approved or connected.</p>",
+      "<p>This is a functional demonstration, not a live rental service. All stations, accounts, payments and device events are simulated.</p><p>Test pricing is shown before each rental. Billing starts only after simulated device pickup evidence is accepted and stops after simulated return evidence is accepted. Each started hour is charged using the stored test pricing version, subject to the displayed cap.</p><p>The test deposit is not real money. A return can be confirmed while a simulated refund is still processing. No actual payment, refund timing or physical service is promised.</p><p>Production pricing, legal terms, real identity providers, PVS and hardware are not approved or connected.</p>",
     );
   else
     modal(

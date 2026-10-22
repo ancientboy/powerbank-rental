@@ -62,7 +62,7 @@ http
           url.pathname === "/" || !url.pathname.includes(".")
             ? "index.html"
             : url.pathname.slice(1);
-        if (!["index.html", "app.js", "style.css"].includes(file)) {
+        if (!["index.html", "app.js", "style.css", "smile-mark.svg"].includes(file)) {
           res.writeHead(404);
           return res.end();
         }
@@ -72,7 +72,9 @@ http
             ? "text/html"
             : file.endsWith("js")
               ? "text/javascript"
-              : "text/css",
+              : file.endsWith("svg")
+                ? "image/svg+xml"
+                : "text/css",
         );
         res.end(await readFile(new URL("../public/" + file, import.meta.url)));
       }
