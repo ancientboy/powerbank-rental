@@ -125,3 +125,14 @@ API（仅 TEST 会话，所有响应 Cache-Control:no-store）：
 每次 POST 必须附同源 Origin、会话 x-csrf-token 和 Idempotency-Key（8–128 位字母、数字、下划线或短横线，推荐 UUID）。同一逻辑请求的网络重试复用该 key；不同操作必须换 key。相同 key 和请求返回持久化原响应，不同请求复用 key 返回 409。重复 quoteId 创建订单也返回原订单，不生成第二笔订单。身份、所有权校验和幂等写入均在服务端；不能用别人的 quoteId/rentalId 操作。GET /api/user/rentals 对 TEST 用户返回自己的模拟历史，对真实用户仍只返回真实记录。原 /api/user/rent、/pay、/return 保持 503，不会通过此变更启用供应商功能。
 
 上线验收至少覆盖：模拟登录后进入扫码入口、DEMO-001 及无效站码、报价、支付失败/重试/取消、成功租借、刷新恢复、归还/历史、后台 TEST 标识、重复点击与断网重试、数据库重开、不同用户隔离、CSRF/Origin 拒绝、关闭开关撤销会话。真实扫码设备、Google OAuth、PVS 收费和 WsCharge 柜机联调仍需另行验收。
+
+
+## 11. 流程恢复与后台并发编辑
+
+本轮沿用 schema v4，无新增迁移。完整步骤见 [FLOW-ACCEPTANCE.md](FLOW-ACCEPTANCE.md)。
+
+客服 POST /api/user/support 可带 Idempotency-Key（8–128 位字母、数字、下划线或短横线）。同一用户、同一 key、同一消息的重试返回同一工单；不同消息复用 key 返回 409。未提供 key 的旧调用仍兼容，但不具备去重保证。不要把客服消息、登录凭据或真实个人数据写入公开日志。
+
+后台站点和工单保存可带 expectedUpdatedAt，价格保存可带 expectedVersion。当前前端附带加载时的值；若记录已变更，服务返回 409，需重新加载并核对后再编辑。旧客户端不带令牌的调用保持兼容，因此接入自定义管理客户端时也应发送令牌。
+
+客户订单列表和后台 TEST 进行中订单金额使用服务器时间动态估算，已结算订单不重新计算。客户端恢复焦点时会同步会话和订单；模拟押金和退款仍不连接真实支付服务。

@@ -1,4 +1,4 @@
-import { handleTestRental, testRentals, testPayments, testStations } from './production-test-rental.mjs';
+import { handleTestRental, testRentals, testPayments, testStations, estimateTestRental } from './production-test-rental.mjs';
 import { randomBytes, createHash, randomUUID } from "node:crypto";
 import {
   verifyPassword,
@@ -232,7 +232,8 @@ export function createProductionAPI({
                 "SELECT id,email,name,created_at,'google' AS provider,0 AS isTest FROM users UNION ALL SELECT id,NULL AS email,name,created_at,'google_test' AS provider,1 AS isTest FROM test_users ORDER BY created_at DESC LIMIT 1000",
               )
               .all(),
-            testRentals: testRentals(db),
+            serverNow: new Date(now()).toISOString(),
+            testRentals: testRentals(db).map(r => estimateTestRental(r, now())),
             testPayments: testPayments(db),
             testStations: googleTestEnabled(config) ? testStations : [],
             rentals: listRecords(db, "rental"),
@@ -260,32 +261,39 @@ export function createProductionAPI({
           rate("write:" + s.subject, 120, 60000);
           if (path.endsWith("/stations")) {
             const id = body.id ? text(body.id, 80) : randomUUID();
-            if (
-              body.id &&
-              !db
-                .prepare("SELECT id FROM records WHERE kind='station' AND id=?")
-                .get(id)
-            )
-              fail(404, "Station not found");
+            const existingRow = db.prepare("SELECT data FROM records WHERE kind='station' AND id=?").get(id);
+            const existing = existingRow ? JSON.parse(existingRow.data) : null;
+            if (body.id && !existing) fail(404, "Station not found");
+            if (Object.hasOwn(body, "expectedUpdatedAt") && body.expectedUpdatedAt !== (existing?.updatedAt || null))
+              fail(409, "Station changed. Reload before saving your edits.");
+            for (const [field, limit] of [["name", 200], ["address", 500], ["cabinetId", 80]]) {
+              if (typeof body[field] === "string" && body[field].trim().length > limit)
+                fail(400, `${field} must be at most ${limit} characters`);
+            }
+            for (const coordinate of [body.latitude, body.longitude]) {
+              if (coordinate != null && typeof coordinate !== "string" && typeof coordinate !== "number")
+                fail(400, "Provide valid numeric coordinates");
+            }
             const station = {
               id,
               name: text(body.name),
               address: text(body.address, 500),
               cabinetId: text(body.cabinetId, 80),
               latitude:
-                body.latitude === "" || body.latitude == null
+                (typeof body.latitude === "string" && !body.latitude.trim()) || body.latitude == null
                   ? null
                   : Number(body.latitude),
               longitude:
-                body.longitude === "" || body.longitude == null
+                (typeof body.longitude === "string" && !body.longitude.trim()) || body.longitude == null
                   ? null
                   : Number(body.longitude),
               active: body.active === true,
-              updatedAt: new Date(now()).toISOString(),
+              updatedAt: new Date(Math.max(now(), (Date.parse(existing?.updatedAt) || 0) + 1)).toISOString(),
             };
             if (
               !station.name ||
               !station.address ||
+              ((station.latitude === null) !== (station.longitude === null)) ||
               (station.latitude !== null &&
                 (!Number.isFinite(station.latitude) ||
                   Math.abs(station.latitude) > 90)) ||
@@ -308,6 +316,8 @@ export function createProductionAPI({
             return json({ station });
           }
           if (path.endsWith("/pricing")) {
+            if (Object.hasOwn(body, "expectedVersion") && body.expectedVersion !== (pricing()?.version || null))
+              fail(409, "Pricing changed. Reload before saving your edits.");
             const p = {
               currency: "ARS",
               hourlyRate: Number(body.hourlyRate),
@@ -338,11 +348,17 @@ export function createProductionAPI({
           const id = text(body.id, 80),
             ticket = listRecords(db, "support").find((x) => x.id === id);
           if (!ticket) fail(404, "Support case not found");
+          if (Object.hasOwn(body, "expectedUpdatedAt") && body.expectedUpdatedAt !== (ticket.updatedAt || null))
+            fail(409, "Support case changed. Reload before saving your edits.");
           if (!["open", "in_progress", "resolved"].includes(body.status))
             fail(400, "Invalid support status");
+          if (typeof body.reply === "string" && body.reply.trim().length > 4000)
+            fail(400, "Support reply must be at most 4000 characters");
+          const reply = text(body.reply, 4000);
+          if (body.status === "resolved" && !reply) fail(400, "Provide a reply before resolving the support case");
           ticket.status = body.status;
-          ticket.reply = text(body.reply, 4000);
-          ticket.updatedAt = new Date(now()).toISOString();
+          ticket.reply = reply;
+          ticket.updatedAt = new Date(Math.max(now(), (Date.parse(ticket.updatedAt) || 0) + 1)).toISOString();
           transaction(db, () => {
             putRecord(db, "support", id, ticket, ticket.userId);
             recordAudit(db, s.subject, "support.update", id, now());
@@ -517,17 +533,30 @@ export function createProductionAPI({
           });
         }
         if (path === "/api/user/rentals" && method === "GET")
-          return json({ rentals: s.user.isTest ? testRentals(db, s.subject) : listRecords(db, "rental", s.subject) });
+          return json({ serverNow: new Date(now()).toISOString(), rentals: s.user.isTest ? testRentals(db, s.subject).map(r => estimateTestRental(r, now())) : listRecords(db, "rental", s.subject) });
         if (path === "/api/user/support" && method === "GET")
           return json({ support: listRecords(db, "support", s.subject) });
         if (path === "/api/user/support" && method === "POST") {
-          rate("support:" + s.subject, 10, 3600000);
+          if (typeof body.message === "string" && body.message.trim().length > 4000)
+            fail(400, "Support message must be at most 4000 characters");
           const message = text(body.message, 4000);
           if (message.length < 5)
             fail(400, "Please describe the issue in at least five characters");
+          const key = req.headers.get("idempotency-key");
+          if (key !== null && !/^[a-zA-Z0-9_-]{8,128}$/.test(key))
+            fail(400, "Provide an Idempotency-Key (8–128 letters, numbers, _ or -)");
+          // Owner-scoped deterministic IDs allow durable retry without a new ledger or schema.
+          const id = key === null ? randomUUID() : "support_" + digest(s.subject + "\n" + key);
+          const previous = db.prepare("SELECT data FROM records WHERE kind='support' AND id=? AND owner_id=?").get(id, s.subject);
+          if (previous) {
+            const ticket = JSON.parse(previous.data);
+            if (ticket.message !== message) fail(409, "Idempotency key already used for a different support request");
+            return json({ support: ticket }, 201);
+          }
+          rate("support:" + s.subject, 10, 3600000);
           const ticket = {
             testOnly: s.user.isTest === true,
-            id: randomUUID(),
+            id,
             userId: s.subject,
             message,
             status: "open",
