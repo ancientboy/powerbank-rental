@@ -1,4 +1,5 @@
-import { WSCHARGE_NOTIFY_PATH, receiveWscharge, wschargeView, sendWschargeCommand } from './production-wscharge.mjs';
+import {hardwareOrders,hardwareState,hardwareAdmin,authorizeHardware,handleHardware,reconcileManualCommand} from './production-hardware-rental.mjs';
+import { WSCHARGE_NOTIFY_PATH, receiveWscharge, wschargeView, sendWschargeCommand, wschargeCabinets, customerStations } from './production-wscharge.mjs';
 import { integrationView, applyIntegrationScenario, resolveIntegrationException, reconcileIntegrationRun, retryIntegrationRefund } from './production-integrations.mjs';
 import { supportView, auditView, pricingHistory, operationQueue, orderResponse } from './production-operations.mjs';
 import { handleTestRental, testRentals, testPayments, testStations, estimateTestRental } from './production-test-rental.mjs';
@@ -220,6 +221,9 @@ export function createProductionAPI({
       if (path.startsWith("/api/admin/")) {
         const s = requireSession(req, "admin");
         if (method !== "GET") csrf(req, s);
+        if(path==='/api/admin/hardware-test'&&method==='GET')return json(hardwareAdmin(db,config,now()));
+        if(path==='/api/admin/hardware-test/authorize'&&method==='POST')return json(authorizeHardware(db,s.user,body,now()));
+        if(path==='/api/admin/hardware-test/reconcile'&&method==='POST')return json(reconcileManualCommand(db,s.user,body.commandId,now()));
         if (path === '/api/admin/wscharge' && method === 'GET') return json(wschargeView(db, config, now()));
         if (path === '/api/admin/wscharge/commands' && method === 'POST') {
           if (s.user.role !== 'owner') fail(403, 'Owner role required');
@@ -270,6 +274,7 @@ export function createProductionAPI({
               testUsers: Number(db.prepare('SELECT count(*) AS n FROM test_users').get().n),
             },
             stations: listRecords(db, "station"),
+            deviceCabinets: wschargeCabinets(db, config, now()),
             users: db
               .prepare(
                 "SELECT id,email,name,created_at,'google' AS provider,0 AS isTest FROM users UNION ALL SELECT id,NULL AS email,name,created_at,'google_test' AS provider,1 AS isTest FROM test_users ORDER BY created_at DESC",
@@ -561,12 +566,20 @@ export function createProductionAPI({
       }
       if (path === "/api/user/stations" && method === "GET")
         return json({
-          stations: listRecords(db, "station").filter((x) => x.active),
+          stations: customerStations(db, config, now()),
+          serverNow: new Date(now()).toISOString(),
           pricing: pricing(),
         });
       if (path.startsWith("/api/user/")) {
         const s = requireSession(req, "user");
         if (method !== "GET") csrf(req, s);
+        if(path.startsWith('/api/user/hardware/')){
+          const cabinets=wschargeCabinets(db,config,now());
+          if(path==='/api/user/hardware/state'&&method==='GET')return json(hardwareState(db,config,s.subject,now(),cabinets));
+          if(method!=='POST')fail(404,'Not found');
+          rate('hardware:'+s.subject,12,60000);
+          return json(await handleHardware({db,config,subject:s.subject,action:path.split('/').at(-1),body,time:now(),cabinets,send:(body,key,rentalId)=>sendWschargeCommand({db,config,actor:{id:s.subject,role:'owner'},body,idempotencyKey:key,time:now(),fetchImpl:wschargeFetch,rentalId})}));
+        }
         if (path.startsWith('/api/user/test/')) {
           if (!googleTestEnabled(config)) fail(404, 'Test rental flow is disabled');
           if (!s.user.isTest) fail(403, 'This simulated flow requires a TEST account');
@@ -582,7 +595,7 @@ export function createProductionAPI({
           });
         }
         if (path === "/api/user/rentals" && method === "GET")
-          return json({ serverNow: new Date(now()).toISOString(), rentals: s.user.isTest ? testRentals(db, s.subject).map(r => estimateTestRental(r, now())) : listRecords(db, "rental", s.subject) });
+          return json({ serverNow: new Date(now()).toISOString(), hardwareRentals: hardwareOrders(db).filter(r=>r.userId===s.subject).map(r=>estimateTestRental(r,now())), rentals: s.user.isTest ? testRentals(db, s.subject).map(r => estimateTestRental(r, now())) : listRecords(db, "rental", s.subject) });
         if (path === '/api/user/support/reply' && method === 'POST') {
           if (typeof body.id !== 'string' || body.id.length > 160) fail(400, 'Invalid support reference');
           if (typeof body.message !== 'string' || body.message.trim().length < 5 || body.message.trim().length > 4000) fail(400, 'Support message must be 5–4000 characters');

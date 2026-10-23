@@ -89,7 +89,7 @@ test('logout deletes recovery draft, while legacy and append-only reply history 
   const content=text(h.elements.get('support-history'));assert.match(content,/First reply.*Newest.*Legacy reply/);assert.match(content,/<script>bad/);assert.match(content,/<order>/);
   assert.equal(flat(h.elements.get('support-history')).filter(n=>n.textContent==='Newest').length,1);
   assert.equal(flat(h.elements.get('support-history')).some(n=>n.tagName==='script'),false);
-  assert.ok(flat(h.elements.get('support-history')).some(n=>n.textContent===new Date('2026-10-20T12:00:00Z').toLocaleString()));
+  assert.ok(flat(h.elements.get('support-history')).some(n=>n.textContent===new Date('2026-10-20T12:00:00Z').toLocaleString('en-GB')));
 });
 
 test('generic help submits null rentalId and successful delivery clears linked draft', async () => {

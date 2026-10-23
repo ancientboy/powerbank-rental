@@ -47,7 +47,7 @@ WantedBy=multi-user.target
 
 ## 4. 独立管理员
 
-在可信服务器交互终端执行 DATABASE_PATH=... npm run admin -- create 用户名 owner。密码最少 14 字符，隐藏输入，scrypt N=32768/r=8/p=1，随机盐。用户名使用小写字母、数字、点、下划线、短横线。不会默认创建 admin/admin 等账号。
+在可信服务器交互终端执行 DATABASE_PATH=... npm run admin -- create 用户名 owner。密码最少 8 字符，隐藏输入，scrypt N=32768/r=8/p=1，随机盐。用户名使用小写字母、数字、点、下划线、短横线。不会默认创建 admin/admin 等账号。
 
 其他角色 operator 可回复工单；viewer 只读。owner 可以维护站点和计价；管理员创建/停用/密码重设仅支持离线 CLI，暂无网页账号管理以免产生开放 bootstrap。
 

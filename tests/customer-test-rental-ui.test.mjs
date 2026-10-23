@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { inflateSync } from 'node:zlib';
 const source = readFileSync(new URL('../production-public/app.js', import.meta.url), 'utf8');
 class Element {
   constructor(tag = 'div') { this.isConnected = true; this.tagName = tag; this.children = []; this.events = {}; this.attributes = {}; this.style = {}; this.value = ''; this.hiddenClasses = new Set(); this.classList = { add: name => this.hiddenClasses.add(name), remove: name => this.hiddenClasses.delete(name), toggle: (name, value) => { if (value === undefined ? !this.hiddenClasses.has(name) : value) this.hiddenClasses.add(name); else this.hiddenClasses.delete(name); } }; }
@@ -26,7 +27,7 @@ async function harness({authenticated=true, state={rental:null,rentals:[]}, stor
   const user = authenticated ? {id:'customer',isTest:true,name:'Test customer'} : null;
   const context = vm.createContext({
     document:{body:new Element('body'), getElementById(id) { for (const node of elements.values()) { const found = flat(node).find(n => n.id === id); if (found) return found; } if (!elements.has(id)) elements.set(id,new Element()); return elements.get(id); },createElement:tag=>new Element(tag)},
-    window:{addEventListener(name, fn){events[name]=fn;}},location:{pathname,search},sessionStorage:{getItem:key=>storage[key] || null,setItem:(key,value)=>{storage[key]=value;},removeItem:key=>{delete storage[key];}},crypto:{randomUUID},Intl,Date,URLSearchParams,console,setTimeout,clearTimeout,
+    window:{addEventListener(name, fn){events[name]=fn;}},location:{pathname,search,origin:'https://47.237.134.133',assign(path){this.assigned=path;}},sessionStorage:{getItem:key=>storage[key] || null,setItem:(key,value)=>{storage[key]=value;},removeItem:key=>{delete storage[key];}},crypto:{randomUUID},Intl,Date,URL,URLSearchParams,console,setTimeout,clearTimeout,
     fetch:async(path,options={})=> { requests.push({path,options}); let data = {};
       if(path==='/api/user/session') data={user,csrf:'csrf',readiness:{googleTest:{ready:true}}};
       if(path==='/api/user/test/state') data={...current,serverNow:new Date().toISOString()};
@@ -48,9 +49,9 @@ test('TEST session restores original home and opens separate scan screen, reject
   assert.ok(!h.elements.get('home-screen').hiddenClasses.has('hidden'));
   assert.ok(h.elements.get('rental-home').hiddenClasses.has('hidden'));
   h.run('startRental()');
-  assert.ok(!h.elements.get('rental-home').hiddenClasses.has('hidden'));
-  assert.match(text(h.elements.get('rental-flow')),/Mock scan · DEMO-001/);
-  const count=h.requests.length;await h.run("requestQuote('REAL-001')");assert.equal(h.requests.length,count);assert.match(h.elements.get('notice').textContent,/Only the demo/);
+  assert.ok(h.elements.get('rental-home').hiddenClasses.has('hidden'));
+  assert.match(text(h.elements.get('sheet-root')),/Scan to rent/);
+  const count=h.requests.length;await h.run("requestQuote('REAL-001')");assert.equal(h.requests.length,count);assert.match(h.elements.get('notice').textContent,/Smile station QR code/);
 });
 test('quote, payment failure/retry, active rental and settlement render end to end',async()=>{
   const h=await harness();await h.run("requestQuote('DEMO-001')");
@@ -69,7 +70,7 @@ test('reload restores pending and active state; cancel returns to scan',async()=
 test('history renders untrusted content only as text and camera fallback needs no permission',async()=>{
   const bad='<img src=x onerror=alert(1)>'; const h=await harness({state:{rental:null,rentals:[{...rental('completed'),stationName:bad}]}});
   assert.ok(flat(h.elements.get('rentals')).some(n=>n.textContent===bad));assert.ok(!flat(h.elements.get('rentals')).some(n=>n.tagName==='img'));
-  const count=h.requests.length;await h.run('startCamera()');assert.equal(h.requests.length,count);assert.match(h.elements.get('notice').textContent,/Enter DEMO-001/);
+  const count=h.requests.length;await h.run('startCamera()');assert.equal(h.requests.length,count);assert.match(text(h.elements.get('sheet-root')),/Choose a photo/);
   assert.doesNotMatch(source,/innerHTML|insertAdjacentHTML|\balert\(|\bconfirm\(/);
 });
 test('return opens custom accessible confirmation and dismissal never mutates',async()=>{
@@ -126,7 +127,7 @@ test('primary scan requests camera once; same hash is harmless and navigation st
   h.context.navigator={mediaDevices:{getUserMedia:async()=>{requests++;return{getTracks:()=>[{stop(){stops++;}}]};}}};
   h.context.BarcodeDetector=class { async detect(){return [];} };
   await h.run('startRental()');
-  assert.equal(requests,1); h.context.location.hash = '#scan'; h.events.hashchange(); assert.equal(stops, 0); assert.match(text(h.elements.get('sheet-root')), /Mock scan/); assert.match(text(h.elements.get('sheet-root')), /Station code/);
+  assert.equal(requests,1); h.context.location.hash = '#home'; h.events.hashchange(); assert.equal(stops, 0); assert.match(text(h.elements.get('sheet-root')), /Mock scan/); assert.match(text(h.elements.get('sheet-root')), /Station code/);
   h.run("navigate('history')"); assert.equal(stops,1); assert.equal(h.elements.get('sheet-root').children.length,0);
 });
 test('late camera grant after navigation is stopped, and existing rental never requests camera', async () => {
@@ -199,9 +200,9 @@ test('support guards duplicate submit, keeps edits and safely retries an uncerta
   assert.equal(draft.value, 'Please help with this rental'); await submit(event);
   assert.equal(keys[0], keys[1]); assert.equal(draft.value, ''); assert.equal(button.disabled, false);
 });
-test('real signed-in customers see availability guidance rather than a sign-in loop', async () => {
+test('real signed-in customers can open the QR scanner without a sign-in loop', async () => {
   const h = await harness(); h.run("session.user = {id:'real-user',isTest:false}; startRental()");
-  assert.equal(h.run('view'), 'stations'); assert.match(h.elements.get('notice').textContent, /Real rentals are not yet available/);
+  assert.equal(h.run('view'), 'home'); assert.match(text(h.elements.get('sheet-root')), /Scan to rent/);
 });
 test('support success preserves text edited while the request is pending', async () => {
   const h = await harness(); const button = new Element('button'); h.elements.get('support-form').append(button);
@@ -244,4 +245,82 @@ test('stale-tab mutation notices describe confirmed outcomes, not requested outc
   h.context.fetch = async (path, options) => path.endsWith('/pay') ? {ok:true,json:async()=>({rental:rental('awaiting_pickup')})} : fetch(path, options);
   await h.run("transact('pay',{rentalId:'test-one',outcome:'failure'})");
   assert.match(h.elements.get('notice').textContent, /deposit paid/); assert.doesNotMatch(h.elements.get('notice').textContent, /payment failed/);
+});
+
+const qrFixture=JSON.parse(readFileSync(new URL('./fixtures/cabinet-qr-pixels.json',import.meta.url)));
+const qrPixels=()=>({data:new Uint8ClampedArray(inflateSync(Buffer.from(qrFixture.rgba,'base64'))),width:qrFixture.width,height:qrFixture.height});
+function installPixelDecoder(h) {
+  vm.runInContext(readFileSync(new URL('../production-public/jsQR.js',import.meta.url),'utf8'),h.context);
+  const create=h.context.document.createElement;
+  h.context.document.createElement=tag=>{
+    const node=create(tag);
+    if(tag==='video'){node.videoWidth=qrFixture.width;node.videoHeight=qrFixture.height;}
+    if(tag==='canvas')node.getContext=()=>({drawImage(){},getImageData:qrPixels});
+    return node;
+  };
+}
+test('bundled decoder reads exact downloadable cabinet QR pixels',async()=>{
+  assert.equal(createHash('sha256').update(readFileSync(new URL('../production-public/cabinet-test-qr.png',import.meta.url))).digest('hex'),qrFixture.sha256);
+  const h=await harness();installPixelDecoder(h);
+  h.context.pixels=qrPixels();
+  assert.equal(h.run('jsQR(pixels.data,pixels.width,pixels.height).data'),'https://47.237.134.133/rent?cabinet=TDMB081675764251');
+});
+test('camera fallback without BarcodeDetector decodes real QR and routes without creating an order',async()=>{
+  const h=await harness({authenticated:false});installPixelDecoder(h);let stops=0;
+  h.context.navigator={mediaDevices:{getUserMedia:async()=>({getTracks:()=>[{stop(){stops++;}}]})}};
+  const before=h.requests.length;await h.run('startRental()');await new Promise(r=>setImmediate(r));
+  assert.equal(h.context.location.assigned,'/rent?cabinet=TDMB081675764251');assert.equal(stops,1);assert.equal(h.requests.length,before);
+});
+test('native detection failure falls back to image decoder',async()=>{
+  const h=await harness();installPixelDecoder(h);let stops=0;
+  h.context.navigator={mediaDevices:{getUserMedia:async()=>({getTracks:()=>[{stop(){stops++;}}]})}};
+  h.context.BarcodeDetector=class{async detect(){throw new Error('Unsupported');}};
+  await h.run('startCamera()');await new Promise(r=>setImmediate(r));
+  assert.equal(h.context.location.assigned,'/rent?cabinet=TDMB081675764251');assert.equal(stops,1);
+});
+test('QR routes only same-origin cabinet URLs or listed bare IDs; rejects external and ambiguous codes',async()=>{
+  const h=await harness({authenticated:false});
+  for(const path of ['/?cabinet=TDMB081675764251','/rent?cabinet=TDMB081675764251']){
+    await h.run(`requestQuote(${JSON.stringify('https://47.237.134.133'+path)})`);assert.equal(h.context.location.assigned,'/rent?cabinet=TDMB081675764251');
+  }
+  for(const code of ['https://evil.example/rent?cabinet=one','https://47.237.134.133.evil.example/?cabinet=one','https://user@47.237.134.133/?cabinet=one','javascript:alert(1)','/rent?cabinet=one&cabinet=two','/rent?cabinet=%3Cscript%3E','/admin?cabinet=one','UNKNOWN'])assert.equal(h.run(`scannedCabinet(${JSON.stringify(code)})`),null);
+  h.run("stationData.liveStations=[{device:{cabinetId:'TDMB081675764251'}}]");assert.equal(h.run("scannedCabinet('TDMB081675764251')"),'TDMB081675764251');
+});
+test('denied camera keeps photo and manual entry usable; local photo decodes real QR',async()=>{
+  const h=await harness({authenticated:false});installPixelDecoder(h);
+  h.context.navigator={mediaDevices:{getUserMedia:async()=>{throw new Error('NotAllowedError');}}};
+  h.context.FileReader=class{readAsDataURL(){this.result='data:image/png;base64,fixture';this.onload();}};
+  h.context.Image=class{constructor(){this.naturalWidth=qrFixture.width;this.naturalHeight=qrFixture.height;}set src(value){this.onload();}};
+  await h.run('startCamera()');assert.match(text(h.elements.get('sheet-root')),/Camera unavailable/);
+  const photo=flat(h.elements.get('sheet-root')).find(n=>n.id==='qr-photo');photo.files=[{size:100}];
+  const before=h.requests.length;await photo.events.change();assert.equal(h.context.location.assigned,'/rent?cabinet=TDMB081675764251');assert.equal(h.requests.length,before);
+});
+test('late native detection after dismissal cannot navigate or create an order',async()=>{
+  const h=await harness();let resolve;
+  h.context.navigator={mediaDevices:{getUserMedia:async()=>({getTracks:()=>[{stop(){}}]})}};
+  h.context.BarcodeDetector=class{detect(){return new Promise(r=>{resolve=r;});}};
+  await h.run('startCamera()');h.run('closeSheet()');resolve([{rawValue:'https://47.237.134.133/rent?cabinet=TDMB081675764251'}]);await new Promise(r=>setImmediate(r));assert.equal(h.context.location.assigned,undefined);
+});
+
+test('hardware order cards retain readable status, price and detail links across demo refresh and clear on logout',async()=>{
+ const h=await harness();h.context.hardwareRow={id:'hw-1',cabinetId:'CAB_TEST',status:'active',slot:3,startedAt:new Date().toISOString(),durationSeconds:125,totalAmount:50000,pricing};
+ h.run('hardwareHistory=[hardwareRow];renderHistory([])');const content=text(h.elements.get('rentals'));
+ assert.match(content,/Slot 3/);assert.match(content,/In use/);assert.match(content,/2m/);assert.doesNotMatch(content,/No rentals yet/);
+ const link=flat(h.elements.get('rentals')).find(n=>n.tagName==='a');assert.equal(link.href,'/rent?cabinet=CAB_TEST&order=hw-1');
+ h.run('renderHistory([])');assert.match(text(h.elements.get('rentals')),/In use/);
+ h.run('clearMemberState();renderHistory([])');assert.doesNotMatch(text(h.elements.get('rentals')),/CAB_TEST/);
+});
+
+test('gallery icon opens the local chooser only on click; manual entry expands and collapses',async()=>{
+ const h=await harness();await h.run('startCamera()');const nodes=flat(h.elements.get('sheet-root'));
+ const photo=nodes.find(n=>n.id==='qr-photo'),gallery=nodes.find(n=>n.attributes['aria-label']==='Choose QR image');
+ let opened=0;photo.click=()=>opened++;assert.equal(opened,0);assert.equal(photo.hidden,true);assert.equal(gallery.tagName,'button');
+ await gallery.click();assert.equal(opened,1);assert.ok(gallery.children.some(n=>n.attributes['aria-hidden']==='true'));
+ const manual=nodes.find(n=>n.id==='scanner-manual'),toggle=nodes.find(n=>n.attributes['aria-controls']==='scanner-manual');
+ assert.equal(manual.hidden,true);await toggle.click();assert.equal(manual.hidden,false);assert.equal(toggle.attributes['aria-expanded'],'true');await toggle.click();assert.equal(manual.hidden,true);
+ assert.equal(h.requests.some(r=>/hardware\/(create|pay)/.test(r.path)),false);
+});
+test('Rent resumes an existing hardware order without dispatching or reopening the scanner',async()=>{
+ const h=await harness();h.run("hardwareHistory=[{id:'h1',cabinetId:'CAB_ONE',status:'active'}]");const before=h.requests.length;await h.run('startRental()');
+ assert.equal(h.context.location.assigned,'/rent?cabinet=CAB_ONE');assert.equal(h.requests.length,before);
 });

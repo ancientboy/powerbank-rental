@@ -1,3 +1,4 @@
+import {reconcileHardwareEvent} from './production-hardware-rental.mjs';
 /** WsCharge HTTP gateway. Supplier command acceptance is never physical pickup.
  * Callback POST/JSON, shared token and Unix-second freshness are a local ingress
  * contract requiring supplier confirmation, not a claimed vendor signature scheme.
@@ -19,7 +20,7 @@ function allowed(c, cabinetId) {
   if (!identifier(cabinetId) || !c.wschargeCabinets.includes(cabinetId)) fail(403, 'Cabinet is not allowlisted');
 }
 export function wschargeStatus(config) {
-  return { enabled: config.wschargeEnabled === true, configured: configured(config), dispatchEnabled: configured(config) && config.wschargeDispatchEnabled === true, callbackPath: WSCHARGE_NOTIFY_PATH, callbackContract: 'POST JSON, body token, Unix-seconds timestamp; supplier confirmation required', automaticSettlement: false, maintenanceCommands: false };
+  return { enabled: config.wschargeEnabled === true, configured: configured(config), dispatchEnabled: configured(config) && config.wschargeDispatchEnabled === true, callbackPath: WSCHARGE_NOTIFY_PATH, callbackContract: 'GET/empty POST connectivity probe; POST form-data or JSON notifications with body token and Unix-seconds timestamp', automaticSettlement: false, maintenanceCommands: false };
 }
 export function wschargeView(db, config, time = Date.now()) {
   const recent = kind => listRecords(db,kind).sort((a,b) => String(b.receivedAt || b.createdAt).localeCompare(String(a.receivedAt || a.createdAt))).slice(0,200);
@@ -30,6 +31,41 @@ export function wschargeView(db, config, time = Date.now()) {
     return {...r, stale: offline || time - r.observedAtSeconds * 1000 > 120000, observedConnection: offline ? 'offline' : connection?.code===60 ? 'online' : 'unknown', available: null, completeness: 'unknown'};
   }) };
 
+}
+// Read-only device projections. Configuration alone never implies online or rentable.
+export function wschargeCabinets(db, config, time = Date.now()) {
+  const events = listRecords(db, 'wscharge_event').filter(e => e.freshness === 'within_window' && e.observedAtSeconds * 1000 <= time);
+  const inventory = listRecords(db, 'wscharge_inventory');
+  return [...new Set(config.wschargeCabinets || [])].map(cabinetId => {
+    const rows = events.filter(e => e.cabinetId === cabinetId).sort((a,b) => b.observedAtSeconds - a.observedAtSeconds || b.code - a.code);
+    const connectionEvent = rows.find(e => [60,64,90].includes(e.code));
+    const latest = rows[0];
+    const sample = inventory.find(e => e.cabinetId === cabinetId && e.observedAtSeconds * 1000 <= time);
+    const offline = connectionEvent?.code === 90;
+    const connection = offline ? 'offline' : connectionEvent && time - connectionEvent.observedAtSeconds * 1000 <= 120000 ? 'online' : 'unknown';
+    const changed = sample && rows.some(e => [65,66,80,81,67,90].includes(e.code) && e.observedAtSeconds >= sample.observedAtSeconds);
+    const stale = Boolean(sample && (time - sample.observedAtSeconds * 1000 > 120000 || changed || offline));
+    return { cabinetId, gatewayEnabled: config.wschargeEnabled === true,
+      connection: config.wschargeEnabled ? connection : 'unknown',
+      inventoryState: !sample ? 'waiting' : stale || !config.wschargeEnabled ? 'stale' : 'observed',
+      lastObservedAt: latest ? iso(latest.observedAtSeconds * 1000) : null,
+      inventoryObservedAt: sample ? iso(sample.observedAtSeconds * 1000) : null,
+      observedBankCount: sample ? sample.banks.length : null,
+      banks: (sample?.banks || []).map(b => ({ slot: b.slot, bankId: b.bankId, batteryPercent: b.batteryPercent, statusCode: b.statusCode ?? null })),
+      rentableAvailable: null, rentalsEnabled: false };
+  });
+}
+export function customerStations(db, config, time = Date.now()) {
+  const cabinets = wschargeCabinets(db, config, time);
+  const stations = listRecords(db, 'station');
+  const publicDevice = d => d ? { ...d, banks: d.banks.map(b => ({ slot: b.slot, batteryPercent: b.batteryPercent })) } : null;
+  const result = stations.filter(s => s.active).map(s => ({ ...s, device: publicDevice(cabinets.find(c => c.cabinetId === s.cabinetId)) }));
+  // Show allowlisted cabinets awaiting location setup without inventing a station/address.
+  if (config.wschargeEnabled) for (const d of cabinets) {
+    if (!stations.some(s => s.cabinetId === d.cabinetId)) result.push({ id: 'device:' + d.cabinetId, cabinetId: d.cabinetId,
+      name: 'Cabinet ' + d.cabinetId, address: '', active: true, locationPending: true, device: publicDevice(d) });
+  }
+  return result;
 }
 function number(value, min, max, label) {
   if ((typeof value !== 'number' && typeof value !== 'string') || !/^\d+$/.test(String(value)) || !Number.isSafeInteger(Number(value)) || Number(value)<min || Number(value)>max) fail(400, 'Invalid ' + label);
@@ -97,13 +133,56 @@ function parseCallbackJSON(raw) {
   }
   return JSON.parse(raw);
 }
+async function parseCallbackForm(raw, contentType) {
+  let form;
+  try { form=await new Response(raw,{headers:{'content-type':contentType}}).formData(); }
+  catch { fail(400,'Invalid callback form'); }
+  const body=Object.create(null), slots=new Map();let count=0;
+  for(const [key,value] of form) {
+    if(++count>520 || typeof value!=='string') fail(400,'Invalid callback form field');
+    const nested=/^terminalArr\[(0|[1-9]\d{0,2})\]\[(B|L|D|S)\]$/.exec(key);
+    if(nested) {
+      const index=Number(nested[1]);if(index>=128)fail(400,'Invalid inventory index');
+      if(!slots.has(index))slots.set(index,Object.create(null));
+      const bank=slots.get(index);if(Object.hasOwn(bank,nested[2]))fail(400,'Duplicate callback field');
+      bank[nested[2]]=value;
+    } else {
+      if(Object.hasOwn(body,key))fail(400,'Duplicate callback field');
+      body[key]=value;
+    }
+  }
+  if(slots.size) {
+    if(Object.hasOwn(body,'terminalArr'))fail(400,'Conflicting inventory encodings');
+    body.terminalArr=[...slots].sort((a,b)=>a[0]-b[0]).map(([index,bank],i)=>{
+      if(index!==i)fail(400,'Non-contiguous inventory indices');return bank;
+    });
+  } else if(Object.hasOwn(body,'terminalArr')) {
+    try { body.terminalArr=parseCallbackJSON(body.terminalArr); }
+    catch { fail(400,'Invalid inventory JSON'); }
+  }
+  if(Object.hasOwn(body,'I'))body.I=number(body.I,0,999,'function code');
+  return body;
+}
 export async function receiveWscharge(db, config, req, time = Date.now()) {
   if (!configured(config)) fail(503,'WsCharge callback intake is disabled');
-  if (req.method!=='POST') fail(405,'POST required');
-  if (!((req.headers.get('content-type')||'').split(';')[0].trim().toLowerCase() === 'application/json')) fail(415,'JSON required');
+  if(new URL(req.url).search)fail(400,'Callback parameters must be in the request body');
+  const probe=()=>({code:200,probe:true,received:false});
+  // Supplier checks reachability before sending the authenticated notification.
+  // A probe never creates an event, changes inventory, or acknowledges device data.
+  if(req.method==='GET')return probe();
+  if(req.method!=='POST')fail(405,'GET probe or POST notification required');
   const raw=await req.text();
-  if (Buffer.byteLength(raw)>16384) fail(413,'Callback too large');
-  let body; try {body=parseCallbackJSON(raw);} catch {fail(400,'Invalid callback JSON');}
+  if(Buffer.byteLength(raw)>16384)fail(413,'Callback too large');
+  if(raw.length===0)return probe();
+  const contentType=req.headers.get('content-type')||'';
+  const mediaType=contentType.split(';')[0].trim().toLowerCase();
+  let body;
+  if(mediaType==='application/json') {
+    try { body=parseCallbackJSON(raw); } catch { fail(400,'Invalid callback JSON'); }
+  } else if(['multipart/form-data','application/x-www-form-urlencoded'].includes(mediaType)) {
+    body=await parseCallbackForm(raw,contentType);
+    if(Object.keys(body).length===0)return probe();
+  } else fail(415,'JSON or form-data required');
   const token=body?.token;
   if (typeof token!=='string' || !timingSafeEqual(Buffer.from(hash(token)),Buffer.from(hash(config.wschargeCallbackToken)))) fail(401,'Callback authentication failed');
   allowed(config,body.E);
@@ -116,6 +195,7 @@ export async function receiveWscharge(db, config, req, time = Date.now()) {
     const candidates=event.freshness === 'outside_window' ? [] : listRecords(db,'wscharge_command').filter(c=>c.cabinetId===event.cabinetId && c.code===event.code && (event.slot===undefined || c.slot===event.slot) && Math.abs(Date.parse(c.createdAt)-event.observedAtSeconds*1000)<=300000).map(c=>c.id);
     const saved={...event,id,receivedAt:iso(time),authentication:'shared_token',trustedForSettlement:false,disposition:'observation_only',candidateCommandIds:candidates};
     putRecord(db,'wscharge_event',id,saved);
+    reconcileHardwareEvent(db,saved,time);
     if (event.code===64 && event.freshness === 'within_window' && event.observedAtSeconds * 1000 <= time) {
       const prior=get(db,'wscharge_inventory',event.cabinetId);
       if (!prior || prior.observedAtSeconds<event.observedAtSeconds) putRecord(db,'wscharge_inventory',event.cabinetId,saved);
@@ -123,7 +203,7 @@ export async function receiveWscharge(db, config, req, time = Date.now()) {
     return {code:200,received:true,duplicate:false};
   });
 }
-export async function sendWschargeCommand({db,config,actor,body,idempotencyKey,time=Date.now(),fetchImpl=fetch}) {
+export async function sendWschargeCommand({db,config,actor,body,idempotencyKey,time=Date.now(),fetchImpl=fetch,rentalId=null}) {
   if (actor?.role!=='owner') fail(403,'Owner role required');
   if (!body || Object.keys(body).some(k=>!['code','cabinetId','slot'].includes(k)) || ![64,65].includes(body.code)) fail(400,'Only inventory query 64 or controlled pickup 65 is supported');
   allowed(config,body.cabinetId);
@@ -138,8 +218,13 @@ export async function sendWschargeCommand({db,config,actor,body,idempotencyKey,t
     return {command:get(db,'wscharge_command',previous.commandId),replayed:true};
   }
   const command=transaction(db,()=>{
-    if (body.code===65 && listRecords(db,'wscharge_command').some(c=>c.code===65 && c.cabinetId===body.cabinetId)) fail(409,'Prior pickup command requires manual supplier reconciliation; automatic re-dispatch is blocked');
+    if (body.code===65 && listRecords(db,'wscharge_command').some(c=>c.code===65 && c.cabinetId===body.cabinetId && !c.reconciledAt)) fail(409,'Prior pickup command requires manual supplier reconciliation; automatic re-dispatch is blocked');
     const c={id:randomUUID(),code:body.code,cabinetId:body.cabinetId,slot,createdAt:iso(time),actorId:actor.id,status:'unknown',physicalPickupConfirmed:false};
+    if(rentalId){
+      const r=get(db,'hardware_rental',rentalId);
+      if(body.code!==65||!r||r.userId!==actor.id||r.status!=='dispatching'||r.commandId||r.cabinetId!==c.cabinetId||r.slot!==slot)fail(409,'Invalid rental reservation');
+      c.rentalId=rentalId;r.commandId=c.id;putRecord(db,'hardware_rental',r.id,r,r.userId);
+    }
     putRecord(db,'wscharge_command',c.id,c);putRecord(db,'wscharge_command_key',key,{fingerprint,commandId:c.id});
     recordAudit(db,actor.id,'wscharge.command.attempt',c.id,time);return c;
   });
@@ -154,6 +239,7 @@ export async function sendWschargeCommand({db,config,actor,body,idempotencyKey,t
     if(response.ok && result?.code===200)command.status='accepted';
     // Rejection and transport errors remain uncertain: no blind retry or billing.
   } catch { command.status='unknown'; }
+  Object.assign(command,{...get(db,'wscharge_command',command.id),status:command.status,httpStatus:command.httpStatus});
   putRecord(db,'wscharge_command',command.id,command);
   return {command,replayed:false};
 }

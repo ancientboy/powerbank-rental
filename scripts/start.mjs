@@ -14,11 +14,16 @@ const db = openProductionStore(config.databasePath),
   api = createProductionAPI({ db, config });
 const assets = new Map([
   ["/", "index.html"],
+  ["/rent", "rent.html"],
+  ["/rent.js", "rent.js"],
+  ["/rent.css", "rent.css"],
+  ["/cabinet-test-qr.png", "cabinet-test-qr.png"],
   ["/auth/error", "index.html"],
   ["/admin", "admin.html"],
   ["/admin/", "admin.html"],
   ["/admin/login", "admin.html"],
   ["/app.js", "app.js"],
+  ["/jsQR.js", "jsQR.js"],
   ["/admin.js", "admin.js"],
   ["/production.css", "production.css"],
   ["/customer.css", "customer.css"],
@@ -30,7 +35,7 @@ const server = http.createServer(async (req, res) => {
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
     "Content-Security-Policy":
-      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     "Cache-Control": "no-store",
   };
   if (config.secure) headers["Strict-Transport-Security"] = "max-age=31536000";
@@ -80,7 +85,9 @@ const server = http.createServer(async (req, res) => {
             ? "text/html; charset=utf-8"
             : filename.endsWith(".js")
               ? "text/javascript; charset=utf-8"
-              : filename.endsWith(".svg")
+              : filename.endsWith(".png")
+                ? "image/png"
+            : filename.endsWith(".svg")
                 ? "image/svg+xml"
                 : "text/css; charset=utf-8",
         },

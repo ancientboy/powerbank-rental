@@ -75,7 +75,7 @@ async function password(prompt) {
 }
 let hash;
 if (operation !== "disable") {
-  const first = await password("New password (14–256 characters, hidden): ");
+  const first = await password("New password (8–256 characters, hidden): ");
   if (first !== (await password("Repeat password (hidden): ")))
     throw new Error("Passwords do not match");
   hash = await hashPassword(first);

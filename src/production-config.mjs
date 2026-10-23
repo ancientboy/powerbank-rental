@@ -30,6 +30,7 @@ export function loadConfig(env = process.env) {
     googleClientSecret: env.GOOGLE_CLIENT_SECRET || "",
     enableGoogleTestLogin: env.ENABLE_GOOGLE_TEST_LOGIN === "1",
     wschargeMaxClockSkewSeconds: Number(env.WSCHARGE_MAX_CLOCK_SKEW_SECONDS || 300),
+    hardwareRentalEnabled: env.WSCHARGE_HARDWARE_TEST_ENABLED === "1",
     wschargeEnabled: env.WSCHARGE_ENABLED === "1",
     wschargeDispatchEnabled: env.WSCHARGE_ENABLE_DISPATCH === "1",
     wschargeApiToken: env.WSCHARGE_API_TOKEN || "",
@@ -62,7 +63,7 @@ export function readiness(config) {
     wscharge: {
       ready: false,
       label:
-        config.wschargeEnabled ? "Gateway enabled; supplier verification required, settlement disabled" : "HTTP gateway disabled",
+        config.hardwareRentalEnabled ? "Supervised physical testing; mock payments only" : config.wschargeEnabled ? "Gateway enabled; supplier verification required, settlement disabled" : "HTTP gateway disabled",
     },
   };
 }

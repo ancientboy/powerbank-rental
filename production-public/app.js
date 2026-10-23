@@ -1,4 +1,5 @@
 'use strict';
+if (globalThis.location?.search) { const cabinet = new URLSearchParams(location.search).get('cabinet'); if (cabinet && /^[A-Za-z0-9_-]{1,64}$/.test(cabinet)) location.replace('/rent?cabinet=' + encodeURIComponent(cabinet)); }
 const $ = (id) => document.getElementById(id);
 let session = { user: null, readiness: {} };
 let testState = null, quote = null, busy = false, clockOffset = 0, cameraStream = null, cameraTimer = null, sheetOpener = null;
@@ -6,6 +7,7 @@ const operationKeys = new Map();
 let stateVersion = 0, stationVersion = 0, memberVersion = 0, supportBusy = false, supportAttempt = null, refreshing = false;
 let supportRentalId = null, supportTicketId = null, supportDraft = null, supportContext = null;
 let navigationVersion = 0, afterLogin = 'home', scanAfterLogin = false, paymentMethod = 'card';
+let hardwareHistory = [];
 let view = 'home', stationData = { stations: [], pricing: null };
 const screens = { home: 'home-screen', stations: 'stations', history: 'member-area', profile: 'account', support: 'support-screen', scan: 'rental-home' };
 const navigation = { 'brand-home': 'home', 'desktop-home': 'home', 'desktop-stations': 'stations', 'desktop-history': 'history', 'desktop-support': 'support', 'mobile-home': 'home', 'mobile-stations': 'stations', 'mobile-history': 'history', 'mobile-profile': 'profile', 'profile-history': 'history', 'profile-stations': 'stations', 'profile-support': 'support', 'home-stations': 'stations', 'footer-help': 'support', 'rental-back': 'home' };
@@ -44,17 +46,19 @@ function navigate(next, updateHash = true) {
   if (view === 'stations') renderStations();
 }
 function startRental() {
-  if (!session.user?.isTest) { scanAfterLogin = true; navigate('scan'); return; }
+  const current=hardwareHistory.find(r=>['pending_payment','dispatching','active','review_required'].includes(r.status));
+  if(current){location.assign('/rent?cabinet='+encodeURIComponent(current.cabinetId));return;}
+  if (!session.user?.isTest || (!testState?.rental && !quote)) return startCamera();
   navigate('scan');
-  if (!testState?.rental && !quote) return startCamera();
 }
 function refreshHome() {
-  $('home-scan-label').textContent = testState?.rental ? 'View current rental' : quote ? 'Continue rental' : 'Scan to rent';
-  const first = stationData.stations?.[0], summary = $('home-station'); summary.replaceChildren();
-  if (first) summary.append(el('strong', first.name, 'home-station-name'), el('p', first.address || 'Address coming soon'), el('p', session.user?.isTest ? `${first.available ?? 0} ready for a test rental · No physical device` : 'Real rentals are not yet available.'));
+  $('home-scan-label').textContent = (testState?.rental || hardwareHistory.some(r=>['pending_payment','dispatching','active','review_required'].includes(r.status))) ? 'View current rental' : quote ? 'Continue rental' : 'Scan to rent';
+  const first = stationData.liveStations?.[0] || stationData.stations?.[0], summary = $('home-station'); summary.replaceChildren();
+  if (first) summary.append(el('strong', first.name, 'home-station-name'), el('p', first.address || 'Address coming soon'), el('p', first.device ? 'Scan this station to rent a power bank.' : 'Simulated station · no physical device'));
   else summary.append(el('p', 'No stations available yet.'));
+  if (first?.device) appendDeviceStatus(summary, first.device);
   $('home-price').textContent = stationData.pricing ? money(stationData.pricing.hourlyRate, stationData.pricing.currency) + ' / hour' : '—';
-  $('home-pricing-note').textContent = session.user?.isTest ? 'Test pricing only. No real charge.' : (!session.user && session.readiness?.googleTest?.ready) ? 'Sign in to try a test rental. You won’t be charged.' : 'Real rentals are not yet available.';
+  $('home-pricing-note').textContent = 'Review station rates before confirming. Test payments only; no real charge.';
 }
 const el = (tag, text, cls) => { const n = document.createElement(tag); if (text != null) n.textContent = text; if (cls) n.className = cls; return n; };
 function supportOwner(user = session.user) { return user?.id ? `${user.isTest ? 'test' : 'live'}:${user.id}` : null; }
@@ -102,7 +106,7 @@ function renderSupportHistory(tickets) {
     for (const reply of replies) {
       card.append(el('strong', reply.actorRole === 'customer' ? 'You' : 'Smile support'), el('p', reply.reply));
       const at = Date.parse(reply.createdAt);
-      if (Number.isFinite(at)) card.append(el('p', new Date(at).toLocaleString(), 'subtle'));
+      if (Number.isFinite(at)) card.append(el('p', new Date(at).toLocaleString('en-GB'), 'subtle'));
     }
     if (ticket.id) {
       let replyForm = null;
@@ -127,7 +131,7 @@ function renderSupportHistory(tickets) {
   }
 }
 function clearMemberState(preserveDraft = false) {
-  testState = null; quote = null; stateVersion++; memberVersion++; stationVersion++; operationKeys.clear();
+  testState = null; quote = null; hardwareHistory = []; stateVersion++; memberVersion++; stationVersion++; operationKeys.clear();
   supportAttempt = null; paymentMethod = 'card'; scanAfterLogin = false; closeSheet();
   if (preserveDraft) saveSupportDraft(); else forgetSupportDraft();
   if (!preserveDraft) { $('support-message').value = ''; supportRentalId = null; supportTicketId = null; } renderSupportContext(); $('support-status').textContent = ''; $('support-history').replaceChildren(); $('rental-flow').replaceChildren();
@@ -145,7 +149,13 @@ function money(value, currency = 'ARS') { const number = Number(value); return N
 async function stations() {
   const button = $('refresh-stations'); button.disabled = true; const version = ++stationVersion, member = session.user;
   try {
-    const isTest = Boolean(session.user?.isTest); const data = await api(isTest ? '/api/user/test/stations' : '/api/user/stations'); if (version !== stationVersion || member !== session.user) return; stationData = data; refreshHome(); renderStations();
+    const isTest = Boolean(session.user?.isTest);
+    const data = await api(isTest ? '/api/user/test/stations' : '/api/user/stations');
+    if (isTest) {
+      try { data.liveStations = (await api('/api/user/stations')).stations || []; }
+      catch { data.liveStationsError = true; }
+    }
+    if (version !== stationVersion || member !== session.user) return; stationData = data; refreshHome(); renderStations();
   } catch (error) { if (version !== stationVersion || member !== session.user) return; $('station-list').replaceChildren(empty('Stations could not be loaded.', 'Please refresh to try again.')); notice(error.message); } finally { button.disabled = false; }
 }
 function renderStations() {
@@ -153,18 +163,40 @@ function renderStations() {
   const list = $('station-list'); list.replaceChildren();
     const available = Array.isArray(data.stations) ? data.stations.filter(s => s.active !== false) : [];
     if (!available.length) list.append(empty('No stations available yet', 'Check back later.'));
-    for (const station of available) { const card = el('article', null, 'card station-card'); card.append(el('span', '↯', 'station-icon'), el('h3', station.name), el('p', station.address || 'Address coming soon'), el('span', isTest ? `${station.available ?? 0} available · TEST` : 'Rentals not yet available', 'badge pending')); if (isTest) card.append(action(testState?.rental?.status === 'active' ? 'Return here · TEST' : testState?.rental ? 'View current rental' : 'Rent here · TEST', () => { if (testState?.rental?.status === 'active') confirmReturn(testState.rental); else if (testState?.rental) navigate('scan'); else requestQuote(station.id); })); list.append(card); }
-    $('pricing').textContent = data.pricing ? `${isTest ? 'Test' : 'Planned'} pricing: ${money(data.pricing.hourlyRate, data.pricing.currency)} / hour · ${money(data.pricing.dailyCap, data.pricing.currency)} daily cap · ${money(data.pricing.deposit, data.pricing.currency)} deposit. ${isTest ? 'No real charge.' : 'Rentals are not yet available.'}` : '';
+    for (const station of available) { const card = el('article', null, 'card station-card'); card.append(el('span', '↯', 'station-icon'), el('h3', station.name), el('p', station.address || 'Address coming soon'), el('span', isTest ? `${station.available ?? 0} available · TEST` : 'Power bank station', 'badge pending')); if (isTest) card.append(action(testState?.rental?.status === 'active' ? 'Return here · TEST' : testState?.rental ? 'View current rental' : 'Rent here · TEST', () => { if (testState?.rental?.status === 'active') confirmReturn(testState.rental); else if (testState?.rental) navigate('scan'); else requestQuote(station.id); })); else appendDeviceStatus(card, station.device); list.append(card); }
+    if (isTest) {
+      list.append(el('h3', 'Smile stations'));
+      if (data.liveStationsError) list.append(empty('Device status could not be loaded.', 'Use Refresh to try again.'));
+      else if (!data.liveStations?.length) list.append(empty('No real cabinets listed yet.', 'Test rentals above use simulated devices.'));
+      for (const station of data.liveStations || []) {
+        const card = el('article', null, 'card station-card');
+        card.append(el('h3', station.name), el('p', station.address || 'Location not configured'), el('span', 'Power bank station', 'badge pending'));
+        appendDeviceStatus(card, station.device); list.append(card);
+      }
+    }
+    $('pricing').textContent = data.pricing ? `${isTest ? 'Test' : 'Planned'} pricing: ${money(data.pricing.hourlyRate, data.pricing.currency)} / hour · ${money(data.pricing.dailyCap, data.pricing.currency)} daily cap · ${money(data.pricing.deposit, data.pricing.currency)} deposit. Test payments only. Confirm station rates before renting.` : '';
+}
+function appendDeviceStatus(card, device) {
+  if (!device) { card.append(el('p', 'Device status not connected')); return; }
+  const connection = { online: 'Online at last refresh', offline: 'Last reported offline', unknown: 'Connection unknown' }[device.connection] || 'Connection unknown';
+  const state = { waiting: 'Waiting for device data', stale: 'Inventory outdated · current status unknown', observed: 'Recent inventory observation · availability unconfirmed' }[device.inventoryState] || 'Inventory unknown';
+  card.append(el('p', connection), el('p', state));
+  if (device.lastObservedAt) card.append(el('p', 'Last device update: ' + new Date(device.lastObservedAt).toLocaleString('en-GB')));
+  if (device.inventoryObservedAt) card.append(el('p', 'Inventory sampled: ' + new Date(device.inventoryObservedAt).toLocaleString('en-GB')));
+  if (device.observedBankCount !== null) card.append(el('p', String(device.observedBankCount) + ' power banks reported · not a rentable count'));
+  for (const bank of device.banks || []) card.append(el('p', `Slot ${bank.slot} · Reported battery ${bank.batteryPercent}%`));
+  card.append(el('p', 'Test payment only. Confirming a rental releases a real power bank.'));
+  const rentLink=el('a','Rent a power bank','button secondary');rentLink.href='/rent?cabinet='+encodeURIComponent(device.cabinetId);card.append(rentLink);
 }
 function account() {
   restoreSupportDraft();
   const testExperience = Boolean(session.user?.isTest || (!session.user && session.readiness?.googleTest?.ready));
   $('experience-label').textContent = testExperience ? 'TEST EXPERIENCE' : 'CHARGE ON THE GO';
-  $('experience-detail').textContent = testExperience ? '· No real charges or physical devices.' : '· Real rentals are not yet available.';
+  $('experience-detail').textContent = '· Test payments only. No real charge.';
   $('footer-label').textContent = testExperience ? '© 2026 Smile · TEST EXPERIENCE' : '© 2026 Smile';
-  $('home-mode-note').textContent = testExperience ? 'Test experience. No real payments or devices.' : 'Real rentals are not yet available.';
-  $('home-scan-note').textContent = testExperience ? 'Try a test rental. No power bank is released.' : 'Explore stations. Real rentals are not yet available.';
-  $('home-price-label').textContent = session.user?.isTest ? 'SIMPLE TEST PRICING' : 'PLANNED PRICING';
+  $('home-mode-note').textContent = 'Scan. Confirm. Charge. Return to finish.';
+  $('home-scan-note').textContent = 'Scan the station QR code, then confirm your rental.';
+  $('home-price-label').textContent = 'SIMPLE PRICING';
   $('support-privacy').textContent = session.user?.isTest ? 'Test messages are saved for administrators. Do not include personal or payment information.' : 'Do not include passwords or payment details.';
   const container = $('account-content'); container.replaceChildren();
   if (!session.user) {
@@ -200,13 +232,16 @@ async function memberData() {
   if (session.user.isTest) await loadTestState();
   const results = await Promise.allSettled([api('/api/user/rentals'), api('/api/user/support')]);
   if (session.user !== member || version !== memberVersion) return;
+  hardwareHistory = results[0].status === 'fulfilled' ? (results[0].value.hardwareRentals || []) : [];
+  refreshHome();
   const rentals = $('rentals'); rentals.replaceChildren();
   if (session.user.isTest) {
     if (testState) renderHistory(testState.rentals || []);
     else rentals.append(empty('Your test rentals could not be loaded.', 'Refresh to try again.'), action('Try again', memberData));
   }
   else if (results[0].status === 'rejected') rentals.append(el('p', 'Your rentals could not be loaded. Please refresh the page.'));
-  else { const rows = results[0].value.rentals || []; if (!rows.length) rentals.append(empty('No rentals yet', 'Real rentals are unavailable.')); for (const rental of rows) { const row = el('div', null, 'integration'); row.append(el('strong', rental.stationName || rental.stationId || 'Rental'), el('span', rental.status || 'Unknown', 'badge'), action('Get help with rental', () => supportForRental(rental), 'secondary small')); rentals.append(row); } }
+  else { const rows = results[0].value.rentals || []; if (!rows.length && !hardwareHistory.length) rentals.append(empty('No rentals yet', 'Your rentals will appear here.')); for (const rental of rows) { const row = el('div', null, 'integration'); row.append(el('strong', rental.stationName || rental.stationId || 'Rental'), el('span', rental.status || 'Unknown', 'badge'), action('Get help with rental', () => supportForRental(rental), 'secondary small')); rentals.append(row); } }
+  if (!session.user.isTest) appendHardwareHistory(rentals);
   const support = $('support-history'); support.replaceChildren();
   if (results[1].status === 'rejected') support.append(el('p', 'Your support history could not be loaded.'));
   else renderSupportHistory(results[1].value.support || []);
@@ -260,11 +295,25 @@ async function transact(kind, body) {
   } catch (error) { if (session.user !== member) return; if (kind === 'rent' && [404, 409].includes(error.status)) quote = null; showFlowError(error); await loadTestState(); }
   finally { busy = false; renderFlow(); if (testState) renderHistory(testState.rentals || []); renderStations(); }
 }
+function scannedCabinet(code) {
+  const value = String(code || '').trim();
+  if (!value || value.length > 512) return null;
+  const known = [...(stationData.stations || []), ...(stationData.liveStations || [])];
+  if (/^[A-Za-z0-9_-]{1,64}$/.test(value) && known.some(s => s.device?.cabinetId === value)) return value;
+  try {
+    const url = new URL(value, location.origin);
+    if (url.origin !== location.origin || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || !['/', '/rent'].includes(url.pathname)) return null;
+    const ids = url.searchParams.getAll('cabinet');
+    return ids.length === 1 && /^[A-Za-z0-9_-]{1,64}$/.test(ids[0]) ? ids[0] : null;
+  } catch { return null; }
+}
 async function requestQuote(code) {
+  const cabinet = scannedCabinet(code);
+  if (cabinet) { closeSheet(); location.assign('/rent?cabinet=' + encodeURIComponent(cabinet)); return true; }
   if (busy || !session.user?.isTest) return;
   if (testState?.rental) { navigate('scan'); return; }
   const member = session.user;
-  if (String(code).trim().toUpperCase() !== 'DEMO-001') { notice('Use DEMO-001. Only the demo station supports test rentals.'); return; }
+  if (String(code).trim().toUpperCase() !== 'DEMO-001') { notice('Scan a Smile station QR code or enter its rental link. DEMO-001 is for simulated rentals only.'); return false; }
   navigate('scan'); busy = true; notice(''); renderFlow();
   try { const result = await mutate('quote', { stationId: 'DEMO-001' }); if (session.user === member && !testState?.rental) quote = result.quote; }
   catch (error) { if (session.user === member) { showFlowError(error); await loadTestState(); } }
@@ -330,7 +379,7 @@ function renderFlow() {
   const buttons = el('div', null, 'flow-actions');
   buttons.append(action('Mock scan · DEMO-001', () => requestQuote('DEMO-001')), action('Scan with camera', startCamera, 'secondary')); card.append(buttons);
   const form = el('form'); const label = el('label', 'Station code'); label.setAttribute('for', 'station-code');
-  const input = el('input'); input.id = 'station-code'; input.name = 'stationCode'; input.placeholder = 'DEMO-001'; input.maxLength = 40; input.required = true; input.autocomplete = 'off'; input.disabled = busy;
+  const input = el('input'); input.id = 'station-code'; input.name = 'stationCode'; input.placeholder = 'Station ID or rental link'; input.maxLength = 512; input.required = true; input.autocomplete = 'off'; input.disabled = busy;
   const submit = el('button', 'Use code', 'button secondary'); submit.type = 'submit'; submit.disabled = busy;
   form.append(label, input, submit); form.addEventListener('submit', event => { event.preventDefault(); requestQuote(input.value); }); card.append(form);
 }
@@ -345,8 +394,22 @@ function updateClock() {
   const total = days * rental.pricing.dailyCap + Math.min(remainder * rental.pricing.hourlyRate, rental.pricing.dailyCap);
   if (cost) cost.textContent = money(total, rental.pricing.currency);
 }
+function appendHardwareHistory(list) {
+  const labels = {pending_payment:'Awaiting confirmation',dispatching:'Releasing',active:'In use',completed:'Returned',cancelled:'Cancelled',review_required:'Needs review'};
+  for (const r of hardwareHistory) {
+    const row=el('article',null,'card hardware-order'),top=el('div',null,'hardware-order-top');
+    top.append(el('strong',r.slot?'Power bank · Slot '+r.slot:'Power bank rental'),el('span',labels[r.status]||'Needs review','badge'));
+    row.append(top,el('p','Station '+r.cabinetId,'subtle'));
+    const metrics=el('div',null,'hardware-order-top');
+    const seconds=r.durationSeconds||0;
+    metrics.append(el('span',r.startedAt?`${Math.floor(seconds/3600)}h ${Math.floor(seconds/60)%60}m`:'Timer has not started'),el('strong',money(r.totalAmount,r.pricing?.currency)));
+    row.append(metrics,el('p',(r.startedAt?new Date(r.startedAt).toLocaleString('en-GB'):'Awaiting confirmation')+' · Test payment','subtle'));
+    const link=el('a',r.status==='active'?'View rental':'Rental details','button secondary small');link.href='/rent?cabinet='+encodeURIComponent(r.cabinetId)+'&order='+encodeURIComponent(r.id)+(r.status==='active'?'':'#orders');row.append(link);list.append(row);
+  }
+}
 function renderHistory(rows) {
-  const list = $('rentals'); list.replaceChildren();
+  const list = $('rentals'); list.replaceChildren(); appendHardwareHistory(list);
+  if (!rows.length && hardwareHistory.length) return;
   if (!rows.length) { list.append(empty('No rentals yet', 'Your test rentals will appear here.')); return; }
   for (const rental of rows) {
     const row = el('article', null, 'history-row');
@@ -355,7 +418,7 @@ function renderHistory(rows) {
     if (rental.depositPaid > 0) row.append(el('span', `Test deposit: ${money(rental.depositPaid, rental.pricing?.currency)}`));
     if (rental.status === 'completed' || rental.status === 'cancelled') { row.append(el('strong', `Rental fee: ${money(rental.totalAmount, rental.pricing?.currency)}`), el('span', rental.legacy ? 'Legacy rental · no deposit collected' : `Test refund: ${money(rental.refundAmount || 0, rental.pricing?.currency)} · ${settlementLabel(rental)}`), action('View receipt', () => showReceipt(rental), 'secondary small')); }
     row.append(action('Get help with rental', () => supportForRental(rental), 'secondary small'));
-    if (rental.createdAt) row.append(el('span', new Date(rental.createdAt).toLocaleString(), 'subtle')); list.append(row);
+    if (rental.createdAt) row.append(el('span', new Date(rental.createdAt).toLocaleString('en-GB'), 'subtle')); list.append(row);
   }
 }
 function closeSheet() {
@@ -375,7 +438,7 @@ function openSheet(title) {
   overlay.addEventListener('click', event => { if (event.target === overlay) closeSheet(); });
   sheet.addEventListener('keydown', event => {
     if (event.key === 'Escape') { event.preventDefault(); closeSheet(); }
-    if (event.key === 'Tab') { const focusable = [...sheet.querySelectorAll('button:not(:disabled),input,video[controls]')]; const first = focusable[0], last = focusable.at(-1); if (event.shiftKey && (document.activeElement === first || document.activeElement === sheet)) { event.preventDefault(); last?.focus(); } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === sheet)) { event.preventDefault(); first?.focus(); } }
+    if (event.key === 'Tab') { const focusable = [...sheet.querySelectorAll('button:not(:disabled),input:not([type=file]),summary,video[controls]')].filter(n=>!n.hidden && !n.closest?.('form[hidden]') && (!n.closest?.('details:not([open])') || n.tagName==='SUMMARY')); const first = focusable[0], last = focusable.at(-1); if (event.shiftKey && (document.activeElement === first || document.activeElement === sheet)) { event.preventDefault(); last?.focus(); } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === sheet)) { event.preventDefault(); first?.focus(); } }
   });
   $('sheet-root').append(overlay); $('customer-shell').inert = true; $('main-content').inert = true;
   if (document.body) document.body.style.overflow = 'hidden'; sheet.focus(); return sheet;
@@ -390,8 +453,8 @@ function showReceipt(rental) {
   const details = el('div', null, 'price-summary');
   for (const [label, value] of [
     ['Rental reference', rental.id || '—'],
-    ['Started', rental.startedAt ? new Date(rental.startedAt).toLocaleString() : '—'],
-    ['Returned', rental.returnedAt ? new Date(rental.returnedAt).toLocaleString() : '—'],
+    ['Started', rental.startedAt ? new Date(rental.startedAt).toLocaleString('en-GB') : '—'],
+    ['Returned', rental.returnedAt ? new Date(rental.returnedAt).toLocaleString('en-GB') : '—'],
     ['Duration', `${Math.floor(seconds / 3600)}h ${Math.floor(seconds / 60) % 60}m ${seconds % 60}s`],
     ['Test payment method', ({ card: 'Debit / credit card · mock', google_pay: 'Google Pay · mock', bank_transfer: 'Bank transfer · mock' })[rental.paymentMethod] || 'Mock payment'],
     ['Test deposit paid', money(rental.depositPaid || 0, rental.pricing?.currency)],
@@ -409,36 +472,89 @@ function confirmReturn(rental) {
   const sheet = openSheet('Return demo power bank?');
   sheet.append(el('p', rental.legacy ? 'End this legacy test rental at its original rates. No deposit was collected and no real charge will occur.' : 'End your test rental, deduct the rental fee from your test deposit and refund the remainder. Any fee above the deposit will be shown separately. No real charge.'), action('Confirm test return', () => { closeSheet(); transact('return', { rentalId: rental.id }); }));
 }
-async function startCamera() {
-  if (busy || !session.user?.isTest || testState?.rental || quote) return;
-  if (!globalThis.BarcodeDetector || !globalThis.navigator?.mediaDevices?.getUserMedia) { notice('Camera scanning is unavailable in this browser. Enter DEMO-001 or use Mock scan.'); return; }
-  const sheet = openSheet('Scan a demo QR code');
-  const hint = el('p', 'Allow camera access to scan. Only DEMO-001 is supported.'); const video = el('video'); video.autoplay = true; video.muted = true; video.playsInline = true; sheet.append(hint, video);
-  sheet.append(action('Mock scan · DEMO-001', () => requestQuote('DEMO-001'), 'secondary'));
-  const manual = el('form'), label = el('label', 'Station code'); label.setAttribute('for', 'camera-station-code');
-  const input = el('input'); input.id = 'camera-station-code'; input.placeholder = 'DEMO-001'; input.maxLength = 40; input.required = true;
-  const submit = el('button', 'Use code', 'button secondary'); submit.type = 'submit';
-  manual.append(label, input, submit); manual.addEventListener('submit', event => { event.preventDefault(); requestQuote(input.value); }); sheet.append(manual);
+function decodeQrImage(source, width, height) {
+  if (!width || !height || typeof globalThis.jsQR !== 'function') return null;
+  const scale = Math.min(1, 1280 / Math.max(width, height));
+  const canvas = document.createElement('canvas'); canvas.width = Math.max(1, Math.round(width * scale)); canvas.height = Math.max(1, Math.round(height * scale));
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+  const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  return globalThis.jsQR(pixels.data, pixels.width, pixels.height, { inversionAttempts: 'attemptBoth' })?.data || null;
+}
+async function startCamera(manualFirst = false) {
+  if (busy || testState?.rental || quote) return;
+  const sheet = openSheet('Scan to rent'); sheet.classList.add('scanner-sheet');
+  const hint = el('p', 'Point your camera at the station QR code.'); hint.setAttribute('aria-live', 'polite');
+  const video = el('video'); video.autoplay = true; video.muted = true; video.playsInline = true; const frame=el('div',null,'scanner-frame'); frame.append(video); sheet.append(hint, frame);
+  let handled = false;
+  const accept = async value => {
+    if (!sheet.isConnected || handled) return false;
+    if (!scannedCabinet(value) && String(value).trim().toUpperCase() !== 'DEMO-001') { hint.textContent = 'This is not a Smile rental code. Please scan the QR code on the station.'; return false; }
+    handled = true; closeSheet();
+    if (String(value).trim().toUpperCase() === 'DEMO-001' && !session.user?.isTest) { scanAfterLogin = true; navigate('scan'); return true; }
+    await requestQuote(value); return true;
+  };
+  const photo = el('input'); photo.type = 'file'; photo.id = 'qr-photo'; photo.accept = 'image/*'; photo.hidden = true; photo.tabIndex = -1;
+  const scanActions=el('div',null,'scanner-actions');
+  const photoButton=el('button',null,'scanner-action'); photoButton.type='button'; photoButton.setAttribute('aria-label','Choose QR image');
+  const photoIcon=el('span',null,'scanner-icon gallery-icon'); photoIcon.setAttribute('aria-hidden','true'); photoButton.append(photoIcon,el('span','Photos'));
+  photoButton.addEventListener('click',()=>photo.click());
+  const codeButton=el('button',null,'scanner-action'); codeButton.type='button'; codeButton.setAttribute('aria-expanded','false'); codeButton.setAttribute('aria-controls','scanner-manual');
+  const codeIcon=el('span',null,'scanner-icon code-icon'); codeIcon.setAttribute('aria-hidden','true'); codeButton.append(codeIcon,el('span','Enter code'));
+  scanActions.append(photoButton,codeButton); sheet.append(scanActions,photo);
+  photo.addEventListener('change', async () => {
+    const file = photo.files?.[0]; if (!file) return;
+    if (file.size > 20 * 1024 * 1024) { hint.textContent = 'Choose a QR image smaller than 20 MB.'; return; }
+    hint.textContent = 'Reading your image…';
+    try {
+      // FileReader keeps the image local; no upload or external decoder service.
+      const data = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(file); });
+      if (!sheet.isConnected) return;
+      const img = await new Promise((resolve, reject) => { const image = new Image(); image.onload = () => resolve(image); image.onerror = reject; image.src = data; });
+      if (!sheet.isConnected) return;
+      const value = decodeQrImage(img, img.naturalWidth, img.naturalHeight);
+      if (value) await accept(value); else hint.textContent = 'No QR code found. Choose a clear image showing the whole code.';
+    } catch { if (sheet.isConnected) hint.textContent = 'Unable to read the image. Try another photo or enter the rental link.'; }
+    finally { photo.value = ''; }
+  });
+  const manual = el('form'); manual.id='scanner-manual'; manual.hidden=!manualFirst; const label = el('label', 'Station code'); label.setAttribute('for', 'camera-station-code');
+  const input = el('input'); input.id = 'camera-station-code'; input.placeholder = 'Station ID or rental link'; input.maxLength = 512; input.required = true;
+  const submit = el('button', 'Continue', 'button secondary'); submit.type = 'submit';
+  manual.append(label, input, submit); manual.addEventListener('submit', event => { event.preventDefault(); return accept(input.value); }); sheet.append(manual); codeButton.setAttribute('aria-expanded',String(manualFirst)); codeButton.addEventListener('click',()=>{manual.hidden=!manual.hidden;codeButton.setAttribute('aria-expanded',String(!manual.hidden));if(!manual.hidden)input.focus();}); if(manualFirst)input.focus();
+  if (session.user?.isTest) { const demo=el('details',null,'scanner-demo'); demo.append(el('summary','Try a simulated station'),action('Mock scan · DEMO-001',()=>accept('DEMO-001'),'secondary')); sheet.append(demo); }
+  if (!globalThis.navigator?.mediaDevices?.getUserMedia) { video.hidden = true; frame.hidden = true; hint.textContent = 'Camera unavailable. Choose a photo or enter the station code.'; return; }
+  let detector = null;
+  try { if (globalThis.BarcodeDetector) detector = new BarcodeDetector({ formats: ['qr_code'] }); } catch { /* Use the bundled decoder. */ }
+  if (!detector && typeof globalThis.jsQR !== 'function') { video.hidden = true; frame.hidden = true; hint.textContent = 'Scanner could not load. Refresh the page or enter the station code.'; return; }
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
     if (!sheet.isConnected) { stream.getTracks().forEach(track => track.stop()); return; }
     cameraStream = stream; video.srcObject = stream; await video.play();
     if (!sheet.isConnected) return;
-    const detector = new BarcodeDetector({ formats: ['qr_code'] });
     const scan = async () => {
-      if (!cameraStream || !sheet.isConnected) return;
-      try { const codes = await detector.detect(video); if (!cameraStream || !sheet.isConnected) return; if (codes.length) { const value = codes[0].rawValue; closeSheet(); await requestQuote(value); return; } }
-      catch { hint.textContent = 'Could not read a QR code. Close this window and enter DEMO-001.'; }
-      if (cameraStream && sheet.isConnected) cameraTimer = setTimeout(scan, 400);
+      if (cameraStream !== stream || !sheet.isConnected) return;
+      try {
+        let value = null;
+        if (detector) { try { value = (await detector.detect(video))[0]?.rawValue; } catch { detector = null; } }
+        if (cameraStream !== stream || !sheet.isConnected) return;
+        if (!value) value = decodeQrImage(video, video.videoWidth, video.videoHeight);
+        if (value && await accept(value)) return;
+      } catch { hint.textContent = 'Keep the whole QR code in view, or choose a photo.'; }
+      if (cameraStream === stream && sheet.isConnected) cameraTimer = setTimeout(scan, 400);
     }; scan();
-  } catch { if (sheet.isConnected) { closeSheet(); notice('Camera access is unavailable. Enter DEMO-001 or use Mock scan.'); } }
+  } catch {
+    if (sheet.isConnected) {
+      if (cameraStream) { cameraStream.getTracks().forEach(track => track.stop()); cameraStream = null; }
+      video.hidden = true; frame.hidden = true; hint.textContent = 'Camera unavailable. Allow camera access, choose a photo, or enter the station code.';
+    }
+  }
 }
 window.addEventListener('pagehide', closeSheet);
 if (typeof setInterval === 'function') setInterval(updateClock, 1000);
 for (const [id, target] of Object.entries(navigation)) $(id).addEventListener('click', () => navigate(target));
 $('account-button').addEventListener('click', () => navigate('profile'));
 $('home-scan').addEventListener('click', startRental);
-$('home-code').addEventListener('click', () => { scanAfterLogin = false; navigate('scan'); });
+$('home-code').addEventListener('click', () => { scanAfterLogin = false; startCamera(true); });
 window.addEventListener('hashchange', () => { const next = String(location.hash || '#home').slice(1); if (next !== view) navigate(next, false); });
 window.addEventListener('popstate', closeSheet);
 $('refresh-history').addEventListener('click', memberData);
@@ -487,3 +603,5 @@ document.addEventListener?.('visibilitychange', () => { if (document.visibilityS
   try { session = await api('/api/user/session'); const loginRoute = savedLoginRoute(Boolean(session.user)); if (loginRoute) afterLogin = loginRoute; account(); navigate(location.pathname === '/auth/error' ? 'profile' : String(location.hash || '#' + (session.user && loginRoute ? loginRoute : 'home')).slice(1), false); const initialNavigation = navigationVersion; await memberData(); if (navigationVersion === initialNavigation && !location.hash && view === 'home' && testState?.rental) navigate('scan'); } catch (error) { $('account-content').replaceChildren(empty('Your account is unavailable.', 'Please refresh the page to try again.')); notice('We couldn’t check your sign-in status. Please refresh to try again.'); }
   await stations();
 })();
+
+if (typeof setInterval === 'function') setInterval(() => { if (document.visibilityState !== 'hidden' && ['home', 'stations'].includes(view) && !busy && !$('refresh-stations').disabled) stations(); }, 30000);

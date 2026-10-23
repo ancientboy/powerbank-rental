@@ -11,7 +11,7 @@ const originalCSS = readFileSync(new URL('../public/style.css', import.meta.url)
 const flat = node => [node, ...node.children.flatMap(flat)];
 const text = node => flat(node).map(n => n.textContent || '').join(' ');
 class Element {
-  constructor(tag = 'div') { this.tagName=tag; this.children=[]; this.events={}; this.attributes={}; this.style={}; this.value=''; this.classes=new Set(); this.classList={add:n=>this.classes.add(n),remove:n=>this.classes.delete(n),toggle:(n,v)=>{if(v===undefined?!this.classes.has(n):v)this.classes.add(n);else this.classes.delete(n);}}; }
+  constructor(tag = 'div') { this.isConnected=true; this.tagName=tag; this.children=[]; this.events={}; this.attributes={}; this.style={}; this.value=''; this.classes=new Set(); this.classList={add:n=>this.classes.add(n),remove:n=>this.classes.delete(n),toggle:(n,v)=>{if(v===undefined?!this.classes.has(n):v)this.classes.add(n);else this.classes.delete(n);}}; }
   append(...nodes){this.children.push(...nodes);} replaceChildren(...nodes){this.children=nodes;} setAttribute(k,v){this.attributes[k]=v;} addEventListener(k,v){this.events[k]=v;} focus(){} scrollIntoView(){} querySelector(tag){return flat(this).find(n=>n.tagName===tag);} querySelectorAll(){return flat(this).filter(n=>n.tagName==='button');}
 }
 const pricing={currency:'ARS',hourlyRate:50000,dailyCap:300000,deposit:1000000};
@@ -53,8 +53,10 @@ test('all four nav buttons change only screens, preserve tab state, and never mu
     assert.equal(['home-screen','stations','member-area','account','rental-home','support-screen'].filter(id=>!hidden(h,id)).length,1);
   }assert.equal(h.requests.filter(r=>r.options.method==='POST').length,count);
 });
-test('scan intent survives test login using challenge CSRF, then enters scan',async()=>{
-  const h=await harness({authenticated:false});await h.click('home-scan');assert.equal(h.run('view'),'profile');
+test('manual code intent survives test login using challenge CSRF, then enters scan',async()=>{
+  const h=await harness({authenticated:false});await h.click('home-code');assert.equal(h.run('view'),'home');
+  const manual=flat(h.elements.get('sheet-root')).find(n=>n.id==='scanner-manual');assert.equal(manual.hidden,false);
+  const code=flat(manual).find(n=>n.id==='camera-station-code');code.value='DEMO-001';await manual.events.submit({preventDefault(){}});assert.equal(h.run('view'),'profile');
   const login=flat(h.elements.get('account-content')).find(n=>n.textContent==='Continue with Google (test)');await login.events.click();
   assert.equal(h.run('view'),'scan');assert.equal(hidden(h,'rental-home'),false);assert.match(text(h.elements.get('rental-flow')),/Mock scan/);
   assert.equal(h.requests.find(r=>r.path==='/api/user/test-login').options.headers['X-CSRF-Token'],'challenge-csrf');

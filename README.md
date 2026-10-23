@@ -53,7 +53,7 @@ PUBLIC_ORIGIN=http://127.0.0.1:4173 ALLOW_LOCAL_HTTP=1 npm start
 DATABASE_PATH=/var/lib/voltgo/production.sqlite npm run admin -- create your-admin-name owner
 ```
 
-命令要求交互式终端、明确输入 YES、两次隐藏密码（14–256 字符）。密码使用 scrypt 存储；不要将密码放入命令行、聊天、GitHub 或环境示例。这里不会替你建立账号。
+命令要求交互式终端、明确输入 YES、两次隐藏密码（8–256 字符）。密码使用 scrypt 存储；不要将密码放入命令行、聊天、GitHub 或环境示例。这里不会替你建立账号。
 
 ## 配置及部署
 

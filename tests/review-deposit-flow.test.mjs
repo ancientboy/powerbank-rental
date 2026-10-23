@@ -170,7 +170,7 @@ test('deposit QA: customer UI clicks drive real API deposit, pickup, return/refu
   }
   try{
     let h=await render();assert.equal(cameras,0);await h.click('account-content','Continue with Google (test)');assert.equal(cameras,0);
-    await h.els.get('home-scan').events.click();assert.equal(cameras,1);assert.match(h.els.get('notice').textContent,/Enter DEMO-001/);
+    await h.els.get('home-scan').events.click();assert.equal(cameras,1);assert.match(text(h.els.get('sheet-root')),/Photos/);
     await h.click('rental-flow','Mock scan');assert.match(text(h.els.get('rental-flow')),/10,000\.00/);assert.match(text(h.els.get('rental-flow')),/500\.00/);
     await h.click('rental-flow','Continue to test payment');assert.match(text(h.els.get('rental-flow')),/Google Pay/);
     assert.equal(flatten(h.els.get('rental-flow')).some(n=>n.tagName==='select'),false);

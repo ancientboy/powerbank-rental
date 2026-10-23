@@ -16,9 +16,10 @@
 
 ## 本服务提出的回调契约
 
-以下是用于安全联调的本地实现约束，**不是供应商已确认的协议**：
+2026-10-23 厂家确认：正式通知前先以 GET 探测端点，失败时再用 POST 探测；探测通过后才发送 form-data 正式通知。以下列出已适配的传输方式及仍由本服务施加的校验：
 
-- 路径：`POST /api/integrations/wscharge/notify`，`Content-Type: application/json`。
+- 路径：`/api/integrations/wscharge/notify`。已配置接入时，无查询参数的 GET、空 POST 或空表单返回 HTTP 200、`{"code":200,"probe":true,"received":false}`，只表示端点可达，不记录设备事件。
+- 正式通知使用 POST `multipart/form-data`；兼容 `application/x-www-form-urlencoded` 和已有 JSON 通知。表单字段 `I` 转为整数，`terminalArr` 支持 JSON 数组字符串或连续索引的 `terminalArr[0][B]` 等表单字段；拒绝重复字段、编码冲突和文件上传。正式通知仍必须通过 token、机柜允许列表、时间戳与业务字段校验。
 - 使用正文 `token` 与显式配置的回调 token 做恒定时间比较；仅接受允许列表内的柜机。共享 token 不是消息签名，也不能证明时间戳没有被持有该 token 的人修改。
 - 将 `timestamp` 解释为 Unix 秒。默认时间偏差窗口为 300 秒；超窗的已认证通知保留为隔离观测，不更新当前库存。
 - 成功接收返回 HTTP 200、JSON `{"code":200,"received":true,"duplicate":false}`；重复事件的 `duplicate` 为 `true`。这个 ACK 格式须由厂家确认。
@@ -26,7 +27,7 @@
 - 通知保留为 `observation_only`，不能成为扣费、退款或订单完成的证据。重复识别与候选命令关联不等于已获得厂商事件 ID 或可靠请求关联。
 - 库存仅为观测，不证明完整可租数量；过期库存不能当成可租承诺。
 - 出站仅允许库存查询 `64` 和明确启用后的受控借出 `65`。请求须经过管理员权限、柜机允许列表及幂等校验；不自动重试物理弹出。结果不确定时必须人工核实，不能换一个幂等键再次尝试。
-- 当前受控借出每台柜机仅允许一次：既有 `65` 记录会阻止新的借出，即使收到了成功样例通知也不自动解除。尚未提供安全核查解锁机制，因此这不是连续真实租赁流程；不要删除数据库或更换柜机标识来绕过限制。
+- 独立管理员命令入口的受控借出每台柜机仅允许一次：既有 `65` 记录会阻止新的借出，即使收到了成功样例通知也不自动解除。该入口不是客户订单流程；现已提供下文所述的证据核查及按订单借还机制。不要删除数据库或更换柜机标识来绕过限制。
 
 ## 环境配置
 
@@ -59,7 +60,7 @@
 
 ## 必须向厂家确认
 
-- 回调是否 POST JSON？实际 `Content-Type` 是什么？能否给出各类事件的脱敏请求样例？
+- 已确认正式通知为 POST form-data，前置 GET/POST 可达性探测；仍需提供各类事件的脱敏请求样例并确认 ACK 正文。
 - 全部通知是否带 `token`？与出站 token 是否相同，如何安全分配和轮换？是否另有签名机制？
 - `timestamp` 是否 Unix 秒，代表设备事件还是发送时刻？重试是否保持原值？设备和服务端时钟如何同步？
 - 收到通知后应返回什么 HTTP 状态与正文？上述 HTTP 200 JSON ACK 是否可接受？
@@ -76,3 +77,48 @@
 - `GET /api/admin/wscharge`：管理员只读查询脱敏状态，最近 200 条观测和命令记录。库存数量不表示可租承诺。
 - `POST /api/admin/wscharge/commands`：仅 owner，继续要求管理员会话、同源、CSRF 与 `Idempotency-Key`。请求为 `code`、`cabinetId` 及借出时的 `slot`；实际向厂家发送命令属于真实设备操作，须完成授权和现场安全确认。
 - 新增数据保存在独立的 records kind，保留原有用户、订单、计费、支付和 TEST 数据，不新增数据库迁移。上线前仍应使用项目备份流程备份。
+
+## Supervised QR rental testing (mock money, physical device)
+
+The `/rent?cabinet=TDMB081675764251` page is a dedicated physical-test flow.
+`/?cabinet=...` redirects there. The QR contains only the HTTPS link and cabinet ID.
+The downloadable `/cabinet-test-qr.png` is for the configured test cabinet; it is
+not an authorization credential. Normal simulated DEMO-001 rentals stay separate.
+
+Enable `WSCHARGE_HARDWARE_TEST_ENABLED=1` and `WSCHARGE_ENABLE_DISPATCH=1` for
+physical testing. All signed-in accounts can use this flow; anonymous visitors
+must sign in first. Per-account requests, owner grants and one-hour grant limits
+are no longer required. Authentication, same-origin/CSRF checks, the cabinet
+allowlist and dispatch switches remain enforced. The current rental-page sign-in
+button uses the configured TEST login; production account onboarding and real
+payments are not yet part of this flow.
+
+The customer journey is: scan → sign in if needed → review rates and click
+**Confirm rental** → see the slot being released → **In use** with the timer →
+automatic return receipt. Scanning alone never dispatches a power bank. Inventory
+refresh and order creation happen behind the confirmation action. A changed price
+requires confirmation again. Customer-facing text is English, with shared Smile
+navigation and rental history. The scanner supports camera decoding, a **Photos**
+icon button for local image decoding, and optional manual station/link entry.
+
+The server selects the highest reported battery (at least 50%), breaking ties by
+slot number, from fresh allowed-cabinet inventory. One unresolved physical order
+per cabinet is permitted. Payment is a mock ledger using the existing illustrative
+ARS deposit/rates; no payment provider is called. Rental time starts at a matched
+successful I=65 callback, without waiting for physical pickup. A matching I=66
+return ends the order and writes one mock fee/refund entry. Repeated callbacks and
+repeated pay requests cannot dispatch or settle twice. Orders and mock payments
+appear in the rental page, customer history and the admin physical-test panel in
+Integrations, Orders and Payments.
+
+Uncertain command results, failed ejection callbacks and missing confirmations
+never cause automatic redispatch or client-forced return/refund. They retain the
+reservation for investigation. The page marks a missing confirmation after 30s.
+A successful return releases the command, but a fresh later inventory is required
+before the next borrow. The original standalone supervised command can only be
+reconciled by an owner with a matched successful ejection, later return and fresh
+inventory proving that bank is back; history is never deleted. There is no general
+force-unlock interface. Unknown/failed cases require individual supplier review.
+
+This test-only callback linkage does not enable live billing or commercial rental.
+All shared-token callback limitations still apply. No secrets are in the QR or UI.

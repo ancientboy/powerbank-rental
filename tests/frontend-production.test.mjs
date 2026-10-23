@@ -70,3 +70,30 @@ test('test login is explicit, uses challenge CSRF and renders test account restr
   assert.match(text(h.elements.get('account-content')), /hardware actions are disabled/);
   assert.ok(h.requests.some(r => r.path === '/api/user/support'));
 });
+
+test('real cabinet waiting and slot battery status appear in the customer stations view without rental actions', async () => {
+  const device={cabinetId:'CAB_1',connection:'unknown',inventoryState:'waiting',observedBankCount:null,banks:[],rentalsEnabled:false};
+  const h=await harness('app.js','/',{'/api/user/session':{user:null,readiness:{}},'/api/user/stations':{stations:[{id:'device:CAB_1',name:'Cabinet CAB_1',active:true,device}]}});
+  assert.match(text(h.elements.get('station-list')),/Waiting for device data/);
+  assert.doesNotMatch(text(h.elements.get('station-list')),/0 power banks|Rent here/);
+  h.context.sample={...device,connection:'offline',inventoryState:'stale',observedBankCount:1,banks:[{slot:2,batteryPercent:77}]};
+  vm.runInContext("stationData.stations[0].device=sample; renderStations()",h.context);
+  const output=text(h.elements.get('station-list'));
+  assert.match(output,/Last reported offline/);assert.match(output,/Inventory outdated/);assert.match(output,/Slot 2 · Reported battery 77%/);assert.doesNotMatch(output,/Rent here/);
+});
+test('TEST accounts see real cabinet observations separately and only mock stations have rental buttons', async () => {
+  const h=await harness('app.js','/',{'/api/user/session':{user:{id:'test_x',isTest:true},readiness:{}},'/api/user/test/stations':{stations:[{id:'DEMO-001',name:'Mock station',active:true,available:3}]},'/api/user/stations':{stations:[{id:'device:CAB_1',name:'Real cabinet',device:{connection:'unknown',inventoryState:'waiting',observedBankCount:null,banks:[]}}]}});
+  for(let i=0;i<4;i++)await settle();
+  const output=text(h.elements.get('station-list'));assert.match(output,/Smile stations/);assert.match(output,/Waiting for device data/);assert.match(output,/Mock station/);
+  const real=h.elements.get('station-list').children.find(n=>text(n).includes('Real cabinet')&&n.tagName==='article');assert.ok(real);assert.equal(real.children.some(n=>n.tagName==='button'),false);
+});
+test('admin Stations and Overview display configured cabinets, unknown inventory and reported power banks', async () => {
+  const device={cabinetId:'CAB_1',connection:'unknown',inventoryState:'waiting',observedBankCount:null,banks:[]};
+  const h=await harness('admin.js','/admin',{'/api/admin/session':{user:{role:'viewer'},csrf:'x'},'/api/admin/dashboard':{deviceCabinets:[device],stations:[]}});
+  assert.match(text(h.elements.get('admin-panel')),/Cabinets and power banks/);
+  vm.runInContext("navigate('stations')",h.context);
+  assert.match(text(h.elements.get('admin-panel')),/CAB_1/);assert.match(text(h.elements.get('admin-panel')),/Waiting for device data/);
+  h.context.sample={...device,inventoryState:'stale',observedBankCount:1,banks:[{slot:1,bankId:'BANK_1',batteryPercent:75,statusCode:200}]};
+  vm.runInContext('data.deviceCabinets=[sample]; render()',h.context);
+  const output=text(h.elements.get('admin-panel'));assert.match(output,/BANK_1/);assert.match(output,/Outdated/);assert.match(output,/75/);assert.match(output,/Rentable availability Unknown/);
+});

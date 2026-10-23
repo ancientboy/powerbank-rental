@@ -11,10 +11,10 @@ const scrypt = promisify(scryptCallback);
 export async function hashPassword(password) {
   if (
     typeof password !== "string" ||
-    password.length < 14 ||
+    password.length < 8 ||
     password.length > 256
   )
-    throw new Error("Password must contain 14–256 characters.");
+    throw new Error("Password must contain 8–256 characters.");
   const salt = randomBytes(32).toString("hex");
   const key = await scrypt(password, salt, 64, {
     N: 32768,

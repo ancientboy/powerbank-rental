@@ -77,6 +77,21 @@ function overview(panel) {
   network.append(table((data.stations || []).slice(0, 5), [['Station', 'name'], ['Address', 'address'], ['Status', 'active', (_, row) => row.active ? 'Active' : 'Inactive']]));
   integrations.append(el('h3', 'Integrations'), integrationList(), el('p', 'Configuration status only. Live connectivity is unverified.', 'subtle')); grid.append(network, integrations); panel.append(grid);
   panel.append(el('div', 'Live rentals, payments, and cabinet controls are unavailable.', 'notice'));
+  deviceStatusPanel(panel);
+}
+function deviceStatusPanel(panel) {
+  const section = el('section', null, 'card'); section.append(el('h3', 'Cabinets and power banks'), el('p', 'Device observations at last refresh. Station Active is a location setting, not an online signal. Inventory is not a rentable count.', 'subtle'));
+  if (!data.deviceCabinets?.length) section.append(empty('No cabinets configured.', ''));
+  for (const cabinet of data.deviceCabinets || []) {
+    const station = (data.stations || []).find(s => s.cabinetId === cabinet.cabinetId);
+    const block = el('article', null, 'card');
+    block.append(facts(cabinet.cabinetId, [['Location', station?.name || 'Location not configured'], ['Connection', {online:'Online at last refresh',offline:'Last reported offline',unknown:'Unknown'}[cabinet.connection] || 'Unknown'], ['Inventory', {waiting:'Waiting for device data',stale:'Outdated · current status unknown',observed:'Recent observation · availability unconfirmed'}[cabinet.inventoryState] || 'Unknown'], ['Last device update', date(cabinet.lastObservedAt)], ['Inventory sampled', date(cabinet.inventoryObservedAt)], ['Reported power banks', cabinet.observedBankCount ?? 'Unknown'], ['Rentable availability', 'Unknown']]));
+    if (cabinet.banks?.length) block.append(table(cabinet.banks, [['Slot','slot'],['Power bank','bankId'],['Reported battery (%)','batteryPercent'],['Supplier status code','statusCode']]));
+    if (!station && canManage()) block.append(button('Set location', () => stationEditor({cabinetId: cabinet.cabinetId})));
+    const testLink=el('a','打开扫码租借测试');testLink.href='/rent?cabinet='+encodeURIComponent(cabinet.cabinetId);block.append(testLink);
+    section.append(block);
+  }
+  panel.append(section);
 }
 function stationEditor(station = {}, discard = false) {
   if (!discard) { leaveEditor(() => stationEditor(station, true)); return; }
@@ -98,7 +113,7 @@ function stationEditor(station = {}, discard = false) {
   });
   $('admin-panel').prepend(form); form.querySelector('input').focus();
 }
-function stations(panel) { const heading = el('div', null, 'panel-heading'); if (!canManage()) heading.append(el('p', 'Read-only access', 'subtle')); if (canManage()) heading.append(button('Add station +', () => stationEditor(), 'button dark')); panel.append(heading, table(data.stations || [], [['Name', 'name'], ['Address', 'address'], ['Cabinet', 'cabinetId'], ['Status', 'active', (_, row) => row.active ? 'Active' : 'Inactive']], canManage() ? row => button('Edit', () => stationEditor(row)) : null)); testRecords(panel, 'Test stations', data.testStations, [['Station', 'name'], ['Address', 'address'], ['Station ID', 'id']]); }
+function stations(panel) { const heading = el('div', null, 'panel-heading'); if (!canManage()) heading.append(el('p', 'Read-only access', 'subtle')); if (canManage()) heading.append(button('Add station +', () => stationEditor(), 'button dark')); panel.append(heading, table(data.stations || [], [['Name', 'name'], ['Address', 'address'], ['Cabinet', 'cabinetId'], ['Status', 'active', (_, row) => row.active ? 'Active' : 'Inactive']], canManage() ? row => button('Edit', () => stationEditor(row)) : null)); testRecords(panel, 'Test stations', data.testStations, [['Station', 'name'], ['Address', 'address'], ['Station ID', 'id']]); deviceStatusPanel(panel); }
 function pricing(panel) {
   const pricingVersion = data.pricing?.version ?? null;
   const form = el('form', null, 'card'); form.dataset.editor = 'pricing'; trackEdits(form); form.append(el('h3', 'Rental pricing'), el('p', 'Rates in ARS. New versions apply to future live rentals only, not existing orders or TEST prices. Saving does not enable live rentals or payments.', 'subtle')); const grid = el('div', null, 'form-grid');
@@ -298,12 +313,13 @@ function render() {
   const panel = $('admin-panel'); detailGeneration++; dirtyForms.clear(); editorForms.clear(); panel.replaceChildren(); $('page-title').textContent = sections[section][0]; document.title = `Smile · ${sections[section][0]}`; for (const link of $('admin-nav').children) { const active = link.dataset.section === section; link.classList.toggle('active', active); if (active) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); }
   if (initialLoadFailed) { panel.append(empty('Dashboard unavailable.', 'Use Refresh to try again. No records have been loaded.')); return; }
   if (section === 'dashboard') overview(panel); else if (section === 'stations') stations(panel); else if (section === 'pricing') pricing(panel); else if (section === 'support') support(panel);
-  else if (section === 'integrations') { const card = el('section', null, 'card'); card.append(el('h3', 'Services'), integrationList(), el('p', 'Configuration status only. Live connectivity is unverified.', 'subtle')); panel.append(card, el('div', 'Live payments and cabinet controls are unavailable.', 'notice')); wschargePanel(panel); integrationLab(panel); }
+  else if (section === 'integrations') { hardwareTestPanel(panel); const card = el('section', null, 'card'); card.append(el('h3', 'Services'), integrationList(), el('p', 'Configuration status only. Live connectivity is unverified.', 'subtle')); panel.append(card, el('div', 'Live payments and cabinet controls are unavailable.', 'notice')); wschargePanel(panel); integrationLab(panel); }
   else if (section === 'orders') orderList(panel);
   else if (section === 'queue') workQueue(panel);
   else if (section === 'payments') { contextHeading(panel); const columns = [['Payment', 'id'], ['Order', 'rentalId|orderId'], ['Type', 'type', kind => ({ deposit: 'Deposit', refund: 'Refund', settlement: 'Legacy settlement', rental_fee: 'Rental fee', authorization: 'Legacy authorization' }[kind] || kind || '—')], ['Amount', 'amount', money], ['Currency', 'currency'], ['Status', 'status'], ['Date', 'createdAt', date]]; panel.append(el('div', 'Recorded payments only. Live payment processing is unavailable.', 'service-note'), table((data.payments || []).filter(row => !contextFilter || (contextFilter.mode !== 'test' && (row.rentalId || row.orderId) === contextFilter.rentalId)), columns)); testRecords(panel, 'Test payments', (data.testPayments || []).filter(row => !contextFilter || (contextFilter.mode !== 'live' && (row.rentalId || row.orderId) === contextFilter.rentalId)), columns); }
   else if (section === 'users') { contextHeading(panel); panel.append(table((data.users || []).filter(row => !contextFilter || row.id === contextFilter.userId), [['Name', 'name'], ['Identity', 'provider', (v, row) => row.isTest || row.testOnly || v === 'google_test' ? 'TEST · Google simulation' : v === 'google' ? 'Google' : v], ['Email', 'email'], ['User ID', 'id'], ['Joined', 'createdAt|created_at', date]])); }
   else if (section === 'audit') auditLog(panel);
+  if (['orders','payments'].includes(section)) hardwareTestPanel(panel);
 }
 function navigate(next) { if (mutationPending) { notice('Wait for the current save to finish.'); return; } if (next === section) { if (!dirtyForms.size) render(); return; } leaveEditor(() => { contextFilter = null; orderSelection = null; section = sections[next] ? next : 'dashboard'; location.hash = section; notice(''); render(); }); }
 async function load() {
@@ -339,3 +355,17 @@ $('reload-dashboard').addEventListener('click', () => { if (mutationPending) { n
 window.addEventListener('beforeunload', event => { if (dirtyForms.size || mutationPending) { event.preventDefault(); event.returnValue = ''; } });
 window.addEventListener('hashchange', () => { const next = location.hash.slice(1); if (sections[next] && section !== next) { if (mutationPending || dirtyForms.size) { location.hash = section; navigate(next); return; } contextFilter = null; orderSelection = null; section = next; notice(''); render(); } });
 (async () => { if (location.pathname === '/admin/login') { $('boot-status').classList.add('hidden'); $('login-view').classList.remove('hidden'); return; } try { session = await api('/api/admin/session'); if (!session.user) { location.replace('/admin/login'); return; } $('admin-identity').textContent = `${session.user.name || session.user.username || 'Administrator'} · ${session.user.role || 'read-only'}`; section = sections[location.hash.slice(1)] ? location.hash.slice(1) : 'dashboard'; for (const [key, [label, symbol]] of Object.entries(sections)) { if (key === 'pricing') $('admin-nav').append(el('span', 'SETTINGS', 'workspace-label ops-nav-group')); const link = el('a', null, 'nav-item'); link.href = `#${key}`; link.dataset.section = key; link.append(el('span', symbol, 'nav-symbol'), el('span', label)); link.addEventListener('click', event => { event.preventDefault(); navigate(key); }); $('admin-nav').append(link); } $('admin-view').classList.remove('hidden'); $('boot-status').classList.add('hidden'); await load(); } catch (error) { $('boot-status').textContent = 'Could not load. Refresh to try again.'; notice(error.message, true); } })();
+
+if (typeof setInterval === 'function') setInterval(() => { if (session.user && document.visibilityState !== 'hidden' && ['dashboard','stations'].includes(section) && !loading && !mutationPending && !dirtyForms.size && !editorForms.size) load().catch(() => {}); }, 30000);
+
+function hardwareTestPanel(panel) {
+ const card=el('section',null,'card');card.append(el('h3','真机扫码测试 · 模拟支付'),el('p','所有已登录账号默认可以测试，无需申请或逐个授权。真实弹出，模拟支付，不会扣款。'));panel.append(card);
+ const content=el('div');card.append(button('刷新真机测试',read),content);
+ async function read(){try{const snapshot=await api('/api/admin/hardware-test');if(!card.isConnected)return;content.replaceChildren();content.append(el('p',`测试入口：${snapshot.enabled?'开启':'关闭'} · 弹出：${snapshot.dispatchEnabled?'开启':'关闭'}`));
+ for(const c of data.deviceCabinets||[]){const link=el('a','租借链接 · '+c.cabinetId);link.href='/rent?cabinet='+encodeURIComponent(c.cabinetId);content.append(link,el('br'));}
+ const qr=el('a','下载本次测试机柜二维码（TDMB081675764251）');qr.href='/cabinet-test-qr.png';qr.download='TDMB081675764251.png';content.append(qr);
+ content.append(el('h4','真机测试订单'),table(snapshot.orders,[['订单','id'],['账号','userId'],['机柜','cabinetId'],['仓位','slot'],['充电宝','bankId'],['状态','status'],['开始','startedAt',date],['归还','returnedAt',date],['模拟费用（最小货币单位）','totalAmount'],['模拟退款（最小货币单位）','refundAmount']]));
+ content.append(el('h4','模拟支付账本 · 无实际扣款'),table(snapshot.payments,[['订单','rentalId'],['类型','type'],['金额（最小货币单位）','amount'],['货币','currency'],['时间','createdAt',date]]));
+ }catch(e){content.replaceChildren(el('p',e.message));}}
+ read();
+}
