@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 for (const path of [
   "dist/scripts/start.mjs",
   "dist/src/production-api.mjs",
+  "dist/src/production-wscharge.mjs",
   "dist/src/production-operations.mjs",
   "dist/src/production-integrations.mjs",
   "dist/production-public/index.html",

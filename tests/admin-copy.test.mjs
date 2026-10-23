@@ -41,7 +41,7 @@ test('readiness compact labels do not claim a live connection', () => {
   const missing = readiness({});
   assert.equal(missing.google.label, 'Not configured');
   assert.equal(missing.pvs.label, 'Pending integration');
-  assert.equal(missing.wscharge.label, 'Pending integration');
+  assert.equal(missing.wscharge.label, 'HTTP gateway disabled');
   assert.equal(missing.pvs.ready, false);
   assert.equal(missing.wscharge.ready, false);
   const configured = readiness({ googleClientId: 'client-id', googleClientSecret: 'secret', publicOrigin: 'https://example.com' });

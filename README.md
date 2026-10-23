@@ -24,6 +24,7 @@
 
 - [后台运营与验收](docs/ADMIN-OPERATIONS.md)
 - [内部厂商适配契约与接入清单](docs/VENDOR-ADAPTER-CONTRACT.md)
+- [WsCharge HTTP 接入与厂家联调边界](docs/WSCHARGE-HTTP.md)
 
 ## 全流程修复与验收
 

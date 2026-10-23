@@ -1,3 +1,4 @@
+import { WSCHARGE_NOTIFY_PATH, receiveWscharge, wschargeView, sendWschargeCommand } from './production-wscharge.mjs';
 import { integrationView, applyIntegrationScenario, resolveIntegrationException, reconcileIntegrationRun, retryIntegrationRefund } from './production-integrations.mjs';
 import { supportView, auditView, pricingHistory, operationQueue, orderResponse } from './production-operations.mjs';
 import { handleTestRental, testRentals, testPayments, testStations, estimateTestRental } from './production-test-rental.mjs';
@@ -49,6 +50,7 @@ export function createProductionAPI({
   db,
   config,
   now = Date.now,
+  wschargeFetch = fetch,
   google = { beginGoogle, exchangeGoogle },
 }) {
   if (!googleTestEnabled(config)) {
@@ -140,6 +142,9 @@ export function createProductionAPI({
         method = req.method;
       if (u.origin !== config.publicOrigin)
         fail(400, "Invalid application origin");
+      // Provider ingress uses its own authentication, never browser session/CSRF.
+      // This exact route is the only exception to the browser Origin requirement.
+      if (path === WSCHARGE_NOTIFY_PATH) return json(await receiveWscharge(db, config, req, now()));
       db.prepare("DELETE FROM sessions WHERE expires<=?").run(now());
       db.prepare("DELETE FROM test_login_states WHERE expires<=?").run(now());
       if (!googleTestEnabled(config)) {
@@ -215,6 +220,12 @@ export function createProductionAPI({
       if (path.startsWith("/api/admin/")) {
         const s = requireSession(req, "admin");
         if (method !== "GET") csrf(req, s);
+        if (path === '/api/admin/wscharge' && method === 'GET') return json(wschargeView(db, config, now()));
+        if (path === '/api/admin/wscharge/commands' && method === 'POST') {
+          if (s.user.role !== 'owner') fail(403, 'Owner role required');
+          rate('wscharge:' + s.subject, 30, 60000);
+          return json(await sendWschargeCommand({ db, config, actor: s.user, body, idempotencyKey: req.headers.get('idempotency-key'), time: now(), fetchImpl: wschargeFetch }));
+        }
         if (path === "/api/admin/session" && method === "GET")
           return json({ user: s.user, csrf: s.csrf });
         if (path === "/api/admin/logout" && method === "POST") {

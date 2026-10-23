@@ -69,7 +69,7 @@ https://developers.google.com/identity/protocols/oauth2/web-server#uri-validatio
 
 ## 6. PVS / WsCharge
 
-仍为 pending。界面展示状态，但不存在一键启用或假成功；真实租出、扣款和归还命令返回不可用；受控 TEST 账户可使用独立的纯模拟流程（见第 10 节）。待用户提供供应商协议、环境、认证/签名、事件去重、查询/退款/结算说明再开发真实适配器和验收。WsCharge 原始厂商资料不放公共仓库。现有离线 codec 不等于运行中的设备网关，也不依据65命令 ACK 开始计费。
+PVS 仍为 pending。WsCharge 已加入默认关闭的 HTTP 网关、认证回调隔离观测及管理员联调接口，配置和限制见 [WSCHARGE-HTTP.md](WSCHARGE-HTTP.md)。这不等于客户真实租借与结算已经打通：客户真实租出、扣款和归还仍不可用，受控 TEST 账户继续使用独立纯模拟流程（见第 10 节）。须确认厂家回调协议、正式凭据和真机结果后继续完成订单与支付联动。WsCharge 原始厂商资料不放公共仓库。现有离线 codec 不等于运行中的设备网关，也不依据65命令 ACK 开始计费。
 
 ## 7. 备份、升级与回滚
 

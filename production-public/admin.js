@@ -218,6 +218,53 @@ function support(panel) {
     }); panel.append(form);
   }
 }
+function wschargePanel(panel) {
+  const generation = detailGeneration;
+  const card = el('section', null, 'card ops-detail');
+  card.append(el('h3', 'WSCharge gateway · read-only'), el('p', 'Supplier observations, separate from the TEST lab. Configuration and received messages do not prove a verified live connection, physical pickup, return, or billing event.', 'service-note'));
+  const content = el('div', null, 'ops-detail');
+  let pending = false;
+  const refresh = button('Refresh gateway records', () => read());
+  card.append(refresh, content); panel.append(card);
+  async function read() {
+    if (pending || section !== 'integrations' || generation !== detailGeneration) return;
+    pending = true; refresh.disabled = true; content.setAttribute('aria-busy', 'true');
+    content.replaceChildren(empty('Loading gateway observations…', ''));
+    try {
+      const snapshot = await api('/api/admin/wscharge');
+      if (section !== 'integrations' || generation !== detailGeneration) return;
+      content.replaceChildren(); renderWscharge(content, snapshot);
+    } catch (error) {
+      if (section === 'integrations' && generation === detailGeneration) content.replaceChildren(empty('Gateway records unavailable.', error.message));
+    } finally { pending = false; refresh.disabled = false; content.removeAttribute('aria-busy'); }
+  }
+  read();
+}
+function renderWscharge(panel, snapshot) {
+  const yesNo = value => value === true ? 'Enabled' : 'Disabled';
+  panel.append(facts('Gateway configuration', [
+    ['HTTP gateway', yesNo(snapshot.enabled)],
+    ['Required configuration', snapshot.configured === true ? 'Present · supplier verification still required' : 'Incomplete or disabled'],
+    ['Physical dispatch flag', yesNo(snapshot.dispatchEnabled) + ' · no controls on this page'],
+    ['Callback path', '/api/integrations/wscharge/notify'],
+    ['Automatic settlement', 'Disabled · observation only'],
+    ['Records refreshed', date(snapshot.serverNow)],
+  ]));
+  panel.append(el('p', 'The callback path is relative to your deployed HTTPS origin, not a confirmed public URL. Supplier callback format and authentication must be verified before live use. Secrets and raw callback payloads are not displayed.', 'subtle'));
+  const observedDate = seconds => seconds === '—' || seconds == null ? '—' : date(Number(seconds) * 1000);
+  const codeLabel = code => ({60:'60 · Login observation',90:'90 · Offline observation',64:'64 · Inventory',65:'65 · Pickup response',66:'66 · Return observation',80:'80 · Maintenance eject observation',81:'81 · Maintenance eject-all observation',67:'67 · Restart observation'}[code] || code);
+  const inbox = el('section');
+  inbox.append(el('h4', 'Callback inbox · latest 200'), el('p', 'Shared-token receipt is not independently verified device evidence. Candidate command matches are not confirmation; callbacks do not start billing or settle orders.', 'subtle'));
+  inbox.append(table(snapshot.events, [['Received','receivedAt',date],['Observed','observedAtSeconds',observedDate],['Cabinet','cabinetId'],['Event','code',codeLabel],['Slot','slot'],['Bank','bankId'],['Supplier status code','statusCode'],['Timestamp check','freshness'],['Treatment','disposition']])); panel.append(inbox);
+  const inventory = el('section'); inventory.append(el('h4', 'Observed inventory · latest 200 cabinets'), el('p', 'Partial, unverified observations only. Listed banks are not an available-rental count. Freshness is evaluated at refresh; completeness and rentable availability remain unknown.', 'subtle'));
+  if (!snapshot.inventory?.length) inventory.append(empty('No inventory observations yet.', 'No cabinet availability is inferred.'));
+  for (const cabinet of snapshot.inventory || []) {
+    inventory.append(facts(cabinet.cabinetId || 'Cabinet', [['Observed',observedDate(cabinet.observedAtSeconds)],['Freshness',cabinet.stale === true ? 'Stale' : cabinet.stale === false ? 'Recent observation · unverified' : 'Unknown'],['Completeness','Unknown'],['Rentable availability','Unknown']]));
+    inventory.append(table(cabinet.banks, [['Slot','slot'],['Bank','bankId'],['Reported battery (%)','batteryPercent'],['Supplier status code','statusCode']]));
+  }
+  panel.append(inventory);
+  const commands = el('section'); commands.append(el('h4', 'Command attempts · latest 200'), el('p', 'Accepted means the supplier accepted a request, not that a bank was physically picked up. Unknown outcomes require reconciliation; this read-only page never sends or retries commands.', 'subtle'), table(snapshot.commands, [['Created','createdAt',date],['Attempt','id'],['Cabinet','cabinetId'],['Command','code',codeLabel],['Slot','slot'],['Request outcome','status'],['HTTP status','httpStatus'],['Physical pickup','physicalPickupConfirmed',()=>'Not confirmed']])); panel.append(commands);
+}
 function integrationLab(panel) {
   const generation = detailGeneration, lab = el('section', null, 'ops-lab'); lab.append(el('h3','TEST integration lab'), el('p','Persisted simulation for device, payment and reconciliation workflows. No physical commands or real payments. Live adapters remain unverified.','service-note')); panel.append(lab);
   const content = el('div', null, 'ops-lab'); content.append(empty('Loading TEST records…','')); lab.append(content);
@@ -251,7 +298,7 @@ function render() {
   const panel = $('admin-panel'); detailGeneration++; dirtyForms.clear(); editorForms.clear(); panel.replaceChildren(); $('page-title').textContent = sections[section][0]; document.title = `Smile · ${sections[section][0]}`; for (const link of $('admin-nav').children) { const active = link.dataset.section === section; link.classList.toggle('active', active); if (active) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); }
   if (initialLoadFailed) { panel.append(empty('Dashboard unavailable.', 'Use Refresh to try again. No records have been loaded.')); return; }
   if (section === 'dashboard') overview(panel); else if (section === 'stations') stations(panel); else if (section === 'pricing') pricing(panel); else if (section === 'support') support(panel);
-  else if (section === 'integrations') { const card = el('section', null, 'card'); card.append(el('h3', 'Services'), integrationList(), el('p', 'Configuration status only. Live connectivity is unverified.', 'subtle')); panel.append(card, el('div', 'Live payments and cabinet controls are unavailable.', 'notice')); integrationLab(panel); }
+  else if (section === 'integrations') { const card = el('section', null, 'card'); card.append(el('h3', 'Services'), integrationList(), el('p', 'Configuration status only. Live connectivity is unverified.', 'subtle')); panel.append(card, el('div', 'Live payments and cabinet controls are unavailable.', 'notice')); wschargePanel(panel); integrationLab(panel); }
   else if (section === 'orders') orderList(panel);
   else if (section === 'queue') workQueue(panel);
   else if (section === 'payments') { contextHeading(panel); const columns = [['Payment', 'id'], ['Order', 'rentalId|orderId'], ['Type', 'type', kind => ({ deposit: 'Deposit', refund: 'Refund', settlement: 'Legacy settlement', rental_fee: 'Rental fee', authorization: 'Legacy authorization' }[kind] || kind || '—')], ['Amount', 'amount', money], ['Currency', 'currency'], ['Status', 'status'], ['Date', 'createdAt', date]]; panel.append(el('div', 'Recorded payments only. Live payment processing is unavailable.', 'service-note'), table((data.payments || []).filter(row => !contextFilter || (contextFilter.mode !== 'test' && (row.rentalId || row.orderId) === contextFilter.rentalId)), columns)); testRecords(panel, 'Test payments', (data.testPayments || []).filter(row => !contextFilter || (contextFilter.mode !== 'live' && (row.rentalId || row.orderId) === contextFilter.rentalId)), columns); }

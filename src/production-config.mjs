@@ -18,6 +18,8 @@ export function loadConfig(env = process.env) {
     throw new Error(
       "PUBLIC_ORIGIN must be a bare HTTPS origin (or explicitly enabled loopback HTTP).",
     );
+  const skew = Number(env.WSCHARGE_MAX_CLOCK_SKEW_SECONDS || 300);
+  if (!Number.isSafeInteger(skew) || skew < 30 || skew > 86400) throw new Error("WSCHARGE_MAX_CLOCK_SKEW_SECONDS must be 30–86400");
   return {
     publicOrigin: u.origin,
     secure: u.protocol === "https:",
@@ -27,6 +29,12 @@ export function loadConfig(env = process.env) {
     googleClientId: env.GOOGLE_CLIENT_ID || "",
     googleClientSecret: env.GOOGLE_CLIENT_SECRET || "",
     enableGoogleTestLogin: env.ENABLE_GOOGLE_TEST_LOGIN === "1",
+    wschargeMaxClockSkewSeconds: Number(env.WSCHARGE_MAX_CLOCK_SKEW_SECONDS || 300),
+    wschargeEnabled: env.WSCHARGE_ENABLED === "1",
+    wschargeDispatchEnabled: env.WSCHARGE_ENABLE_DISPATCH === "1",
+    wschargeApiToken: env.WSCHARGE_API_TOKEN || "",
+    wschargeCallbackToken: env.WSCHARGE_CALLBACK_TOKEN || "",
+    wschargeCabinets: (env.WSCHARGE_CABINET_IDS || "").split(",").map(x => x.trim()).filter(Boolean),
     sessionSeconds: 28800,
     userSessionSeconds: 604800,
   };
@@ -54,7 +62,7 @@ export function readiness(config) {
     wscharge: {
       ready: false,
       label:
-        "Pending integration",
+        config.wschargeEnabled ? "Gateway enabled; supplier verification required, settlement disabled" : "HTTP gateway disabled",
     },
   };
 }
