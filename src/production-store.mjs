@@ -75,6 +75,8 @@ export function openProductionStore(path) {
         INSERT INTO schema_migrations VALUES(4,datetime('now'));`);
     });
   }
+  db.exec(`CREATE INDEX IF NOT EXISTS records_owner ON records(kind,owner_id);
+    CREATE INDEX IF NOT EXISTS hardware_rental_status ON records(json_extract(data,'$.status')) WHERE kind='hardware_rental';`);
   return db;
 }
 export function listRecords(db, kind, owner) {

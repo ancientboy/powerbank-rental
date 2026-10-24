@@ -16,20 +16,23 @@ const save=(db,r)=>putRecord(db,'hardware_rental',r.id,r,r.userId);
 const open=r=>!['completed','cancelled','bought_out'].includes(r.status);
 // Reservations survive restarts. Only a release in flight serializes the cabinet;
 // an uncertain outcome holds its bank and slot, never every other bank.
-export function blockingHardwareCommand(db,c,cabinetId,slot=null){
+export function blockingHardwareCommand(db,c,cabinetId,slot=null,ordersById=null){
  if(c.code!==65||c.cabinetId!==cabinetId||c.reconciledAt)return false;
- const r=c.rentalId&&hardwareOrders(db).find(r=>r.id===c.rentalId);
+ const row=c.rentalId&&!ordersById&&db.prepare("SELECT data FROM records WHERE kind='hardware_rental' AND id=?").get(c.rentalId);
+ const r=c.rentalId&&(ordersById?ordersById.get(c.rentalId):row?JSON.parse(row.data):null);
  if(!r)return true; // Standalone/legacy commands still need explicit reconciliation.
  return r.status==='dispatching'||(r.status==='review_required'&&(slot===null?false:r.slot===slot));
 }
-export function availableHardwareBanks(db,cabinet){
- const held=hardwareOrders(db).filter(r=>['dispatching','active','review_required'].includes(r.status)||r.status==='bought_out'&&!r.returnedAt);
+export function availableHardwareBanks(db,cabinet,orders=hardwareOrders(db)){
+ const held=orders.filter(r=>['dispatching','active','review_required'].includes(r.status)||r.status==='bought_out'&&!r.returnedAt);
  return cabinet.banks.filter(b=>b.batteryPercent>=50&&!held.some(r=>r.bankId===b.bankId||r.cabinetId===cabinet.cabinetId&&r.slot===b.slot&&!['active','bought_out'].includes(r.status)));
 }
 export function maintainHardware(db,time=Date.now()){
  return transaction(db,()=>{
+  replayPendingHardwareEvents(db,time);
   let changed=0;
-  for(const r of hardwareOrders(db)){
+  const actionable=db.prepare("SELECT data FROM records WHERE kind='hardware_rental' AND json_extract(data,'$.status') IN ('active','dispatching','pending_payment')").all().map(row=>JSON.parse(row.data));
+  for(const r of actionable){
    if(r.status==='active'&&hasRentalPolicy(r.pricing)){
     const estimate=policyEstimate(r,time);
     if(time>=Date.parse(estimate.buyoutDueAt)){
@@ -52,9 +55,32 @@ export function maintainHardware(db,time=Date.now()){
  });
 }
 export function hardwareAccess(db,subject){return Boolean(db.prepare('SELECT id FROM users WHERE id=? UNION ALL SELECT id FROM test_users WHERE id=? LIMIT 1').get(subject,subject));}
+// Client-facing fields are explicit: operational notes, identities and evidence stay private.
+export function customerHardwareRental(r,time){
+ const estimated=estimateTestRental(r,time);
+ const fields=['id','userId','cabinetId','status','createdAt','startedAt','dispatchedAt','endedAt','returnedAt','cancelledAt','bankId','slot','returnCabinetId','returnSlot','testOnly','physicalHardware','depositPaid','depositApplied','totalAmount','refundAmount','outstandingAmount','settlementStatus','durationSeconds','buyoutDueAt','buyoutReason','boughtOutAt','buyoutWarning','buyoutReview'];
+ const result=Object.fromEntries(fields.filter(k=>Object.hasOwn(estimated,k)).map(k=>[k,estimated[k]]));
+ const prices=['currency','hourlyRate','dailyCap','deposit','totalCap','maxRentalDays','policyVersion','version','updatedAt','testOnly','illustrative'];
+ result.pricing=Object.fromEntries(Object.entries(estimated.pricing||{}).filter(([k])=>prices.includes(k)));
+ result.confirmationDelayed=r.status==='dispatching'&&time-Date.parse(r.dispatchedAt)>30000;
+ return result;
+}
 export function hardwareState(db,config,subject,time,cabinets){
- const rentals=hardwareOrders(db).filter(r=>r.userId===subject).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).map(r=>({...estimateTestRental(r,time),confirmationDelayed:r.status==='dispatching'&&time-Date.parse(r.dispatchedAt)>30000}));
- return {enabled:config.hardwareRentalEnabled===true,dispatchEnabled:config.wschargeDispatchEnabled===true,authorized:hardwareAccess(db,subject,time),userId:subject,serverNow:iso(time),pricing:hardwarePricing(db),cabinets:cabinets.map(c=>({...c,banks:c.banks.map(b=>({slot:b.slot,batteryPercent:b.batteryPercent})),availableSlots:availableHardwareBanks(db,c).map(b=>b.slot),availableCount:availableHardwareBanks(db,c).length,busy:hardwareOrders(db).some(r=>r.cabinetId===c.cabinetId&&r.status==='dispatching')||listRecords(db,'wscharge_command').some(cmd=>blockingHardwareCommand(db,cmd,c.cabinetId))})),rental:rentals.find(open)||null,rentals};
+ const all=hardwareOrders(db),byId=new Map(all.map(r=>[r.id,r])),commands=listRecords(db,'wscharge_command');
+ const rentals=all.filter(r=>r.userId===subject).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).map(r=>customerHardwareRental(r,time));
+ const projected=cabinets.map(c=>{const available=availableHardwareBanks(db,c,all);return {...c,banks:c.banks.map(b=>({slot:b.slot,batteryPercent:b.batteryPercent})),availableSlots:available.map(b=>b.slot),availableCount:available.length,busy:all.some(r=>r.cabinetId===c.cabinetId&&r.status==='dispatching')||commands.some(cmd=>blockingHardwareCommand(db,cmd,c.cabinetId,null,byId))};});
+ return {enabled:config.hardwareRentalEnabled===true,dispatchEnabled:config.wschargeDispatchEnabled===true,authorized:hardwareAccess(db,subject),userId:subject,serverNow:iso(time),pricing:hardwarePricing(db),cabinets:projected,rental:rentals.find(open)||null,rentals};
+}
+// Caller holds the database transaction. This queue survives restarts and runs
+// before timeout/buyout maintenance so a due return is applied before settlement.
+export function replayPendingHardwareEvents(db,time){
+ const due=listRecords(db,'wscharge_pending_event').filter(e=>e.observedAtSeconds*1000<=time).sort((a,b)=>a.observedAtSeconds-b.observedAtSeconds||a.code-b.code);
+ for(const e of due){
+  reconcileHardwareEvent(db,e,time);
+  const row=db.prepare("SELECT data FROM records WHERE kind='wscharge_event' AND id=?").get(e.id);
+  if(row)putRecord(db,'wscharge_event',e.id,{...JSON.parse(row.data),processingState:'processed',processedAt:iso(time)});
+  db.prepare("DELETE FROM records WHERE kind='wscharge_pending_event' AND id=?").run(e.id);
+ }
 }
 export function hardwareAdmin(db,config,time){return {accessMode:'all_signed_in',enabled:config.hardwareRentalEnabled===true,dispatchEnabled:config.wschargeDispatchEnabled===true,requests:listRecords(db,'hardware_test_request').map(r=>({...r,authorized:hardwareAccess(db,r.id,time)})),orders:hardwareOrders(db).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)),payments:listRecords(db,'hardware_payment'),testers:listRecords(db,'hardware_tester')};}
 export function authorizeHardware(db,actor,body,time){
@@ -110,6 +136,17 @@ export function reconcileHardwareEvent(db,e,time){
   // of a payment. Quarantine this bank again without taking back the refund.
   const closed=hardwareOrders(db).filter(r=>r.status==='cancelled'&&r.cancellationReason==='operator_verified_no_release'&&r.bankId===e.bankId&&r.cabinetId===e.cabinetId&&r.slot===e.slot&&e.observedAtSeconds>=Math.floor(Date.parse(r.dispatchedAt)/1000));
   const candidate=closed.sort((a,b)=>b.dispatchedAt.localeCompare(a.dispatchedAt))[0];
+  const later=candidate&&hardwareOrders(db).filter(r=>r.id!==candidate.id&&r.bankId===candidate.bankId&&Date.parse(r.dispatchedAt)>Date.parse(candidate.dispatchedAt)).sort((a,b)=>a.dispatchedAt.localeCompare(b.dispatchedAt))[0];
+  if(later){
+   // Keep the old refund/order closed. Its delayed evidence must not claim the
+   // bank from a subsequent rental or make the next return ambiguous.
+   if(candidate.lateReleaseConflict?.eventId!==e.id){
+    candidate.lateReleaseConflict={eventId:e.id,observedAt:iso(e.observedAtSeconds*1000),laterRentalId:later.id};
+    candidate.reviewReason='late_release_after_rerental';candidate.reviewAt=iso(time);candidate.settlementStatus='review_required';delete candidate.settlementReviewedAt;
+    save(db,candidate);recordAudit(db,'system','hardware.rental.late_release_conflict',candidate.id,time);
+   }
+   return;
+  }
   if(candidate){candidate.status='review_required';candidate.reviewReason='release_after_cancellation';candidate.reviewAt=iso(time);candidate.lateReleaseAt=iso(e.observedAtSeconds*1000);candidate.startedAt=candidate.lateReleaseAt;candidate.ejectEventId=e.id;save(db,candidate);recordAudit(db,'system','hardware.rental.late_release',candidate.id,time);}
   return;
  }
@@ -211,7 +248,7 @@ export function resolveHardwareOrder(db,actor,body,time,cabinets){
    for(const e of events)reconcileHardwareEvent(db,e,time);
    r=hardwareOrders(db).find(x=>x.id===r.id);
   }else if(body.action==='acknowledge_balance'){
-   if(!['completed','bought_out'].includes(r.status)||r.settlementStatus!=='review_required')fail(409,'Only a completed settlement review can be acknowledged');
+   if(!(['completed','bought_out'].includes(r.status)||r.status==='cancelled'&&r.lateReleaseConflict)||r.settlementStatus!=='review_required')fail(409,'Only a completed settlement review can be acknowledged');
    r.settlementReviewedAt=iso(time);r.settlementReviewedBy=actor.id;
   }else if(body.action!=='note'){
    if(!r.testOnly)fail(409,'Live payments require provider reconciliation');
@@ -234,7 +271,7 @@ export function resolveHardwareOrder(db,actor,body,time,cabinets){
    r.resolutionEvidence={inventoryObservedAt:evidence.inventoryObservedAt,cabinetId:evidence.cabinetId,bankId:r.bankId};
   }
   r.handlingHistory=[...(r.handlingHistory||[]),{id:randomUUID(),action:body.action,note:body.note.trim(),actorId:actor.id,actorRole:actor.role,createdAt:iso(time),beforeStatus:before.status,afterStatus:r.status}];
-  if(['completed','cancelled','active'].includes(r.status)&&!r.buyoutReview)delete r.reviewReason;
+  if(['completed','cancelled','active'].includes(r.status)&&!r.buyoutReview&&!r.lateReleaseConflict)delete r.reviewReason;
   save(db,r);recordAudit(db,actor.id,'hardware.rental.handle',r.id,time,{before,after:r});
   return {rental:r};
  });

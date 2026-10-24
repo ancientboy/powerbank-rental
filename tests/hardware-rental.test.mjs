@@ -263,3 +263,63 @@ test('pause blocks new quotes and previously unpaid orders; in-flight release, r
  assert.equal((await x.request('cancel',{rentalId:b.id},'b')).status,200);
  assert.equal(x.calls(),1);
 });
+
+test('delayed release from cancelled rental cannot reclaim a bank already re-rented; review is actionable',async t=>{
+ const x=await setup(t),a=await x.create();await x.request('pay',{rentalId:a.id});const oldTs=x.time()/1000+1;
+ x.advance(61000);maintainHardware(x.db,x.time());await x.inventory();x.resolve(a,'cancel_unreleased');
+ x.advance(1000);await x.inventory();const b=await x.create('b');await x.request('pay',{rentalId:b.id},'b');x.advance(1000);await x.notify(65,{L:3,B:'BANK_A',S:200});
+ await x.notify(65,{L:3,B:'BANK_A',S:200},oldTs);
+ const old=hardwareOrders(x.db).find(r=>r.id===a.id);assert.equal(old.status,'cancelled');assert.equal(old.lateReleaseConflict.laterRentalId,b.id);assert.equal(old.settlementStatus,'review_required');
+ const {operationQueue}=await import('../src/production-operations.mjs');assert.ok(operationQueue(x.db).some(i=>i.rentalId===a.id));
+ x.resolve(a,'acknowledge_balance');assert.ok(!operationQueue(x.db).some(i=>i.rentalId===a.id));
+ x.advance(1000);await x.notify(66,{L:3,B:'BANK_A'});await x.notify(66,{L:3,B:'BANK_A'});
+ assert.equal(hardwareOrders(x.db).find(r=>r.id===b.id).status,'completed');assert.equal(hardwareOrders(x.db).find(r=>r.id===a.id).status,'cancelled');
+ assert.equal(listRecords(x.db,'hardware_payment').filter(r=>r.rentalId===a.id&&r.type==='refund').length,1);
+ assert.equal(listRecords(x.db,'hardware_payment').filter(r=>r.rentalId===b.id).length,3);
+ assert.equal(x.calls(),2);
+});
+
+test('future-clock return is applied on retry once due and cannot settle twice',async t=>{
+ const x=await setup(t),r=await x.create();await x.request('pay',{rentalId:r.id});x.advance(1000);await x.notify(65,{L:3,B:'BANK_A',S:200});
+ x.advance(1000);const timestamp=x.time()/1000+5;await x.notify(66,{L:3,B:'BANK_A'},timestamp);
+ assert.equal(hardwareOrders(x.db)[0].status,'active');assert.equal(listRecords(x.db,'wscharge_pending_event').length,1);
+ x.advance(10000);assert.equal((await x.notify(66,{L:3,B:'BANK_A'},timestamp)).duplicate,true);
+ assert.equal(hardwareOrders(x.db)[0].status,'completed');assert.equal(hardwareOrders(x.db)[0].returnedAt,new Date(timestamp*1000).toISOString());
+ maintainHardware(x.db,x.time());assert.equal(listRecords(x.db,'wscharge_pending_event').length,0);assert.equal(listRecords(x.db,'hardware_payment').length,3);
+});
+
+test('future-clock release and return survive restart and process in event order without supplier retries',async t=>{
+ const dir=mkdtempSync(join(tmpdir(),'deferred-events-')),path=join(dir,'test.sqlite');t.after(()=>rmSync(dir,{recursive:true,force:true}));
+ const x=await setup(t,path),r=await x.create();await x.request('pay',{rentalId:r.id});
+ const start=x.time()/1000+5,end=start+2;
+ await x.notify(66,{L:3,B:'BANK_A'},end);await x.notify(65,{L:3,B:'BANK_A',S:200},start);
+ assert.equal(hardwareOrders(x.db)[0].status,'dispatching');x.db.close();
+ const db=openProductionStore(path);try{maintainHardware(db,(end+1)*1000);const done=hardwareOrders(db)[0];assert.equal(done.status,'completed');assert.equal(done.startedAt,new Date(start*1000).toISOString());assert.equal(done.returnedAt,new Date(end*1000).toISOString());assert.equal(listRecords(db,'wscharge_pending_event').length,0);maintainHardware(db,(end+100)*1000);assert.equal(listRecords(db,'hardware_payment').length,3);}finally{db.close();}
+ assert.equal(x.calls(),1);
+});
+
+test('out-of-window future callbacks remain observations and never enter deferred settlement',async t=>{
+ const x=await setup(t),r=await x.create();await x.request('pay',{rentalId:r.id});
+ await x.notify(65,{L:3,B:'BANK_A',S:200},x.time()/1000+600);assert.equal(listRecords(x.db,'wscharge_pending_event').length,0);
+ x.advance(601000);maintainHardware(x.db,x.time());assert.equal(hardwareOrders(x.db)[0].status,'review_required');assert.equal(hardwareOrders(x.db)[0].startedAt,undefined);
+});
+
+test('customer state, history and mutation responses never expose operator notes or internal evidence',async t=>{
+ const x=await setup(t),r=await x.create();x.resolve(r,'note','Private supplier investigation');
+ const stored=hardwareOrders(x.db)[0];stored.resolutionEvidence={secretMarker:'internal-only'};stored.pricing.internalOnly='hidden-pricing';putRecord(x.db,'hardware_rental',stored.id,stored,stored.userId);
+ const responses=[(await x.request('state')).body,(await x.request('cancel',{rentalId:r.id})).body];
+ const history=await x.api(new Request(x.config.publicOrigin+'/api/user/rentals',{headers:{cookie:'voltgo_user='+'a'.repeat(43)}}));responses.push(await history.json());
+ responses.push((await x.request('pay',{rentalId:r.id})).body);
+ for(const response of responses){const raw=JSON.stringify(response);assert.doesNotMatch(raw,/handlingHistory|actorId|actorRole|resolutionEvidence|Private supplier|internal-only|hidden-pricing/);}
+ const internal=hardwareOrders(x.db)[0];assert.equal(internal.handlingHistory[0].note,'Private supplier investigation');assert.equal(internal.resolutionEvidence.secretMarker,'internal-only');
+});
+
+test('state query uses a bounded number of full order reads with 1000 unreturned buyouts',async t=>{
+ const x=await setup(t),timestamp=new Date(x.time()-3600000).toISOString();
+ for(let i=0;i<1000;i++){const r={id:'history_'+i,userId:'other_'+i,cabinetId:cabinet,status:'bought_out',createdAt:timestamp,startedAt:timestamp,bankId:'HIST_'+i,slot:3};putRecord(x.db,'hardware_rental',r.id,r,r.userId);putRecord(x.db,'wscharge_command','command_'+i,{id:'command_'+i,code:65,cabinetId:cabinet,rentalId:r.id,createdAt:timestamp});}
+ let queries=0,rows=0;const prepare=x.db.prepare.bind(x.db);
+ x.db.prepare=function(sql){const statement=prepare(sql);if(sql==='SELECT data FROM records WHERE kind=?')return {all(...args){const result=statement.all(...args);if(args[0]==='hardware_rental'){queries++;rows+=result.length;}return result;}};return statement;};
+ const start=performance.now(),state=await x.request('state');assert.equal(state.status,200);assert.equal(state.body.cabinets[0].busy,false);assert.deepEqual(state.body.cabinets[0].availableSlots,[3,4]);assert.equal(state.body.rentals.length,0);
+ assert.ok(queries<=2,`Unexpected full reads: ${queries}`);assert.ok(rows<=2000,`Unexpected parsed rows: ${rows}`);
+ t.diagnostic(JSON.stringify({history:1000,fullOrderReads:queries,rowsParsed:rows,stateMs:Math.round((performance.now()-start)*100)/100}));
+});

@@ -1,5 +1,5 @@
 import {cabinetControl,assertNewRentalAllowed} from './production-cabinet-control.mjs';
-import {reconcileHardwareEvent,blockingHardwareCommand} from './production-hardware-rental.mjs';
+import {reconcileHardwareEvent,blockingHardwareCommand,replayPendingHardwareEvents} from './production-hardware-rental.mjs';
 /** WsCharge HTTP gateway. Supplier command acceptance is never physical pickup.
  * Callback POST/JSON, shared token and Unix-second freshness are a local ingress
  * contract requiring supplier confirmation, not a claimed vendor signature scheme.
@@ -192,12 +192,16 @@ export async function receiveWscharge(db, config, req, time = Date.now()) {
   const { freshness: _freshness, ...identity } = event;
   const id=hash(canonical(identity));
   return transaction(db,()=>{
+    replayPendingHardwareEvents(db,time);
     const previous=get(db,'wscharge_event',id);
     if (previous) return {code:200,received:true,duplicate:true};
     const candidates=event.freshness === 'outside_window' ? [] : listRecords(db,'wscharge_command').filter(c=>c.cabinetId===event.cabinetId && c.code===event.code && (event.slot===undefined || c.slot===event.slot) && Math.abs(Date.parse(c.createdAt)-event.observedAtSeconds*1000)<=300000).map(c=>c.id);
     const saved={...event,id,receivedAt:iso(time),authentication:'shared_token',trustedForSettlement:false,disposition:'observation_only',candidateCommandIds:candidates};
     putRecord(db,'wscharge_event',id,saved);
-    reconcileHardwareEvent(db,saved,time);
+    if([65,66].includes(saved.code)&&saved.freshness==='within_window'&&saved.observedAtSeconds*1000>time){
+      saved.processingState='pending_clock';putRecord(db,'wscharge_event',id,saved);putRecord(db,'wscharge_pending_event',id,saved);
+    }else{reconcileHardwareEvent(db,saved,time);}
+
     if (event.code===64 && event.freshness === 'within_window' && event.observedAtSeconds * 1000 <= time) {
       const prior=get(db,'wscharge_inventory',event.cabinetId);
       if (!prior || prior.observedAtSeconds<event.observedAtSeconds) putRecord(db,'wscharge_inventory',event.cabinetId,saved);

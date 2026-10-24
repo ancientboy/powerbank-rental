@@ -421,7 +421,7 @@ function hardwareResolution(panel,row){
  const form=el('form',null,'ticket');form.dataset.editor='hardware-'+row.id;trackEdits(form);
  form.append(el('h3','Handle physical rental'),el('p','No release command is sent by these actions. Refresh inventory first. Cancellation requires the same bank in its original slot; return confirmation requires it in a cabinet. Record your verification in the note. Payments and refunds are simulated.','subtle'));
  let selected='recheck';const choices=[['recheck','Recheck callbacks'],['note','Record note']];
- if(['completed','bought_out'].includes(row.status)&&row.settlementStatus==='review_required')choices.push(['acknowledge_balance','Mark balance reviewed (no charge)']);
+ if((['completed','bought_out'].includes(row.status)||row.status==='cancelled'&&row.lateReleaseConflict)&&row.settlementStatus==='review_required')choices.push(['acknowledge_balance','Mark balance reviewed (no charge)']);
  if(row.status==='active'||row.status==='bought_out'&&!row.returnedAt||(row.lateReleaseAt&&row.status==='review_required'))choices.push(['confirm_return','Confirm returned bank']);
  if(['dispatching','review_required'].includes(row.status)&&!row.startedAt)choices.push(['cancel_unreleased','Confirm no release & cancel']);
  if(row.buyoutReview)choices.push(['resume_buyout','Resume automatic buyout after review']);

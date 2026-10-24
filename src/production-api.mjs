@@ -1,6 +1,6 @@
 import { cabinetQrResponse, validCabinetId } from './production-cabinet-qr.mjs';
 import {saveCabinetControl,cabinetControl} from './production-cabinet-control.mjs';
-import {hardwarePricing,hardwareOrders,hardwareState,hardwareAdmin,authorizeHardware,handleHardware,reconcileManualCommand,maintainHardware,resolveHardwareOrder} from './production-hardware-rental.mjs';
+import {hardwarePricing,hardwareOrders,customerHardwareRental,hardwareState,hardwareAdmin,authorizeHardware,handleHardware,reconcileManualCommand,maintainHardware,resolveHardwareOrder} from './production-hardware-rental.mjs';
 import { WSCHARGE_NOTIFY_PATH, receiveWscharge, wschargeView, sendWschargeCommand, wschargeCabinets, customerStations } from './production-wscharge.mjs';
 import { integrationView, applyIntegrationScenario, resolveIntegrationException, reconcileIntegrationRun, retryIntegrationRefund } from './production-integrations.mjs';
 import { supportView, auditView, pricingHistory, operationQueue, orderResponse } from './production-operations.mjs';
@@ -623,7 +623,8 @@ export function createProductionAPI({
           if(path==='/api/user/hardware/state'&&method==='GET')return json(hardwareState(db,config,s.subject,now(),cabinets));
           if(method!=='POST')fail(404,'Not found');
           rate('hardware:'+s.subject,12,60000);
-          return json(await handleHardware({db,config,subject:s.subject,action:path.split('/').at(-1),body,time:now(),cabinets,send:(body,key,rentalId)=>sendWschargeCommand({db,config,actor:{id:s.subject,role:'owner'},body,idempotencyKey:key,time:now(),fetchImpl:wschargeFetch,rentalId})}));
+          const result=await handleHardware({db,config,subject:s.subject,action:path.split('/').at(-1),body,time:now(),cabinets,send:(body,key,rentalId)=>sendWschargeCommand({db,config,actor:{id:s.subject,role:'owner'},body,idempotencyKey:key,time:now(),fetchImpl:wschargeFetch,rentalId})});
+          return json(result.rental?{...result,rental:customerHardwareRental(result.rental,now())}:result);
         }
         if (path.startsWith('/api/user/test/')) {
           if (!googleTestEnabled(config)) fail(404, 'Test rental flow is disabled');
@@ -640,7 +641,7 @@ export function createProductionAPI({
           });
         }
         if (path === "/api/user/rentals" && method === "GET")
-          return json({ serverNow: new Date(now()).toISOString(), hardwareRentals: hardwareOrders(db).filter(r=>r.userId===s.subject).map(r=>estimateTestRental(r,now())), rentals: s.user.isTest ? testRentals(db, s.subject).map(r => estimateTestRental(r, now())) : listRecords(db, "rental", s.subject) });
+          return json({ serverNow: new Date(now()).toISOString(), hardwareRentals: listRecords(db,'hardware_rental',s.subject).map(r=>customerHardwareRental(r,now())), rentals: s.user.isTest ? testRentals(db, s.subject).map(r => estimateTestRental(r, now())) : listRecords(db, "rental", s.subject) });
         if (path === '/api/user/support/reply' && method === 'POST') {
           if (typeof body.id !== 'string' || body.id.length > 160) fail(400, 'Invalid support reference');
           if (typeof body.message !== 'string' || body.message.trim().length < 5 || body.message.trim().length > 4000) fail(400, 'Support message must be 5–4000 characters');

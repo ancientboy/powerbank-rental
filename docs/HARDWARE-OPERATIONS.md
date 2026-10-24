@@ -246,3 +246,26 @@ The DOM, login sessions, supplier and payments are synthetic. This verifies
 software integration, not a phone camera, real Google authorization, physical
 hardware or live payment processing. No production database or credentials are
 used. This targeted group passed all 11 tests on 2026-10-24.
+
+## Callback recovery and customer projections (2026-10-24)
+
+Authenticated release/return events slightly ahead of server time, within the
+configured clock-skew window, are persisted in `wscharge_pending_event`. They are
+processed in timestamp order once due, before timeout/buyout maintenance, either
+by the 15-second maintenance task or subsequent callback/customer activity. The
+queue and its removal share the order/ledger transaction and survive restart.
+Out-of-window callbacks remain observations; this does not relax authentication
+or authorize release retries.
+
+A successful old release notification arriving after its cancelled order's bank
+has been rented again keeps the old order cancelled and its refund unchanged.
+It records `late_release_after_rerental` in the work queue for review. Operators
+can mark the balance reviewed with a note. The old order does not reserve the
+bank again or interfere with the later rental's return.
+
+Customer state/history and rental mutation responses use explicit order and
+pricing field lists. Operator notes, actor identities and reconciliation evidence
+remain available in admin responses and durable records only. Status queries
+reuse one order snapshot, and single-command checks look up their linked order
+by ID. Maintenance selects actionable statuses using an index instead of parsing
+all completed/bought-out history. This retains SQLite and does not change prices.
