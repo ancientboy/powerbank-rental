@@ -8,6 +8,9 @@ let stateVersion = 0, stationVersion = 0, memberVersion = 0, supportBusy = false
 let supportRentalId = null, supportTicketId = null, supportDraft = null, supportContext = null;
 let navigationVersion = 0, afterLogin = 'home', scanAfterLogin = false, paymentMethod = 'card';
 let hardwareHistory = [];
+let rentalLoadState = 'loading', accountLoadState = 'loading', rentalCheckedAt = null, testStateFailed = false;
+let nearbyLocation = null, nearbyState = 'idle', nearbyMessage = '';
+const nearbyRadiusKm = 5;
 let view = 'home', stationData = { stations: [], pricing: null };
 const screens = { home: 'home-screen', stations: 'stations', history: 'member-area', profile: 'account', support: 'support-screen', scan: 'rental-home' };
 const navigation = { 'brand-home': 'home', 'desktop-home': 'home', 'desktop-stations': 'stations', 'desktop-history': 'history', 'desktop-support': 'support', 'mobile-home': 'home', 'mobile-stations': 'stations', 'mobile-history': 'history', 'mobile-profile': 'profile', 'profile-history': 'history', 'profile-stations': 'stations', 'profile-support': 'support', 'home-stations': 'stations', 'footer-help': 'support', 'rental-back': 'home' };
@@ -45,20 +48,122 @@ function navigate(next, updateHash = true) {
   if (updateHash) window.scrollTo?.({ top: 0, behavior: 'instant' });
   if (view === 'stations') renderStations();
 }
+function currentHomeRental() {
+  const ranks = { active: 0, review_required: 1, dispatching: 2, awaiting_pickup: 2, pending_payment: 3 };
+  const rental = hardwareHistory.filter(r => Object.hasOwn(ranks, r.status)).sort((a, b) => ranks[a.status] - ranks[b.status])[0];
+  if (rental) return { rental, demo: false };
+  if (session.user?.isTest && testState?.rental && Object.hasOwn(ranks, testState.rental.status)) return { rental: testState.rental, demo: true };
+  return null;
+}
 function startRental() {
-  const current=hardwareHistory.find(r=>['pending_payment','dispatching','active','review_required'].includes(r.status));
-  if(current){location.assign('/rent?cabinet='+encodeURIComponent(current.cabinetId));return;}
+  const current = currentHomeRental();
+  if (current) {
+    if (current.demo) navigate('scan');
+    else location.assign('/rent?cabinet=' + encodeURIComponent(current.rental.cabinetId) + '&order=' + encodeURIComponent(current.rental.id));
+    return;
+  }
+  if (accountLoadState !== 'ready' || (session.user && (rentalLoadState !== 'ready' || testStateFailed))) {
+    notice('Please refresh your rental status before starting another rental.');
+    refreshSession(); return;
+  }
   if (!session.user?.isTest || (!testState?.rental && !quote)) return startCamera();
   navigate('scan');
 }
+function stationCoordinates(station) {
+  const lat = station.latitude, lng = station.longitude;
+  return typeof lat === 'number' && Number.isFinite(lat) && Math.abs(lat) <= 90 && typeof lng === 'number' && Number.isFinite(lng) && Math.abs(lng) <= 180 ? { latitude: lat, longitude: lng } : null;
+}
+function stationDistanceKm(a, b) {
+  const rad = x => x * Math.PI / 180;
+  const h = Math.sin(rad(b.latitude - a.latitude) / 2) ** 2 + Math.cos(rad(a.latitude)) * Math.cos(rad(b.latitude)) * Math.sin(rad(b.longitude - a.longitude) / 2) ** 2;
+  return 6371 * 2 * Math.asin(Math.sqrt(Math.min(1, Math.max(0, h))));
+}
+function locateNearbyStations() {
+  if (nearbyState === 'loading') return;
+  if (!globalThis.navigator?.geolocation) { nearbyState = 'error'; nearbyMessage = 'Location is unavailable in this browser. Browse all stations instead.'; refreshHome(); return; }
+  nearbyState = 'loading'; nearbyLocation = null; nearbyMessage = ''; refreshHome();
+  try { navigator.geolocation.getCurrentPosition(position => {
+    const coords = stationCoordinates(position.coords || {});
+    if (!coords || !Number.isFinite(position.coords.accuracy) || position.coords.accuracy > 5000) {
+      nearbyState = 'error'; nearbyMessage = 'Your location is not precise enough. Try again or browse all stations.';
+    } else { nearbyLocation = { ...coords, at: Date.now() }; nearbyState = 'ready'; }
+    refreshHome();
+  }, error => {
+    nearbyState = 'error'; nearbyMessage = error.code === 1 ? 'Location permission was not granted. You can still browse all stations.' : 'Could not find your location. Try again or browse all stations.';
+    refreshHome();
+  }, { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 }); }
+  catch { nearbyState = 'error'; nearbyMessage = 'Location is unavailable. Browse all stations instead.'; refreshHome(); }
+}
 function refreshHome() {
-  $('home-scan-label').textContent = (testState?.rental || hardwareHistory.some(r=>['pending_payment','dispatching','active','review_required'].includes(r.status))) ? 'View current rental' : quote ? 'Continue rental' : 'Scan to rent';
-  const first = stationData.liveStations?.[0] || stationData.stations?.[0], summary = $('home-station'); summary.replaceChildren();
-  if (first) summary.append(el('strong', first.name, 'home-station-name'), el('p', first.address || 'Address coming soon'), el('p', first.device ? 'Scan this station to rent a power bank.' : 'Simulated station · no physical device'));
-  else summary.append(el('p', 'No stations available yet.'));
-  if (first?.device) appendDeviceStatus(summary, first.device);
+  const current = currentHomeRental();
+  $('home-station').replaceChildren(); $('home-current-rental').replaceChildren();
+  const summary = current ? $('home-current-rental') : $('home-station');
+  $('home-station-panel').classList.toggle('hidden', Boolean(current));
+  $('home-qr-art').classList.toggle('hidden', Boolean(current));
+  $('home-below-hero').classList.toggle('has-current-rental', Boolean(current));
+  $('home-screen').classList.toggle('has-current-rental', Boolean(current));
+  const uncertain = accountLoadState !== 'ready' || (session.user && (rentalLoadState !== 'ready' || testStateFailed));
+  $('home-scan-label').textContent = current ? 'View current rental' : uncertain ? 'Check rental status' : quote ? 'Continue rental' : 'Scan to rent';
+  $('home-scan-kicker').textContent = current ? 'YOUR POWER, IN PROGRESS' : 'YOUR NEXT CHARGE STARTS HERE';
+  $('home-scan-step').classList.toggle('hidden', Boolean(current));
+  $('home-scan-title').textContent = current ? 'Your current rental' : 'Find the QR code on the station';
+  $('home-scan-note').textContent = current ? 'View your rental details or find a return station.' : 'Scan the station QR code, then confirm your rental.';
+  $('home-code').classList.toggle('hidden', Boolean(current));
+  $('home-price-label').textContent = 'SIMPLE PRICING';
   $('home-price').textContent = stationData.pricing ? money(stationData.pricing.hourlyRate, stationData.pricing.currency) + ' / hour' : '—';
   $('home-pricing-note').textContent = 'Review station rates before confirming. Test payments only; no real charge.';
+  if (current) {
+    const { rental: r, demo } = current;
+    const labels = { active: 'In use', pending_payment: 'Awaiting confirmation', dispatching: 'Releasing power bank', awaiting_pickup: 'Awaiting pickup', review_required: 'Needs review' };
+    $('home-station-title').textContent = 'Current rental';
+    const top = el('div', null, 'home-rental-heading');
+    top.append(el('strong', demo ? 'Demo power bank · TEST' : 'Your power bank', 'home-station-name'), el('span', labels[r.status], 'badge pending'));
+    summary.append(top);
+    const stations = stationData.liveStations || stationData.stations || [];
+    const station = stations.find(s => s.cabinetId === r.cabinetId);
+    summary.append(el('p', demo ? r.stationName || r.stationId : (station?.name ? station.name + ' · ' : '') + 'Cabinet ' + r.cabinetId));
+    if (r.slot != null) summary.append(el('p', 'Slot ' + r.slot + (r.bankId ? ' · Power bank ' + r.bankId : ''), 'subtle'));
+    if (r.status === 'active' && r.startedAt) {
+      const seconds = Number.isFinite(r.durationSeconds) ? Math.max(0, r.durationSeconds) : 0;
+      summary.append(el('p', 'Rental duration: ' + Math.floor(seconds / 3600) + 'h ' + Math.floor(seconds / 60) % 60 + 'm'));
+    } else summary.append(el('p', r.status === 'review_required' ? 'This rental needs checking. Open the details or contact support.' : 'The rental timer starts after release is confirmed.'));
+    if (rentalCheckedAt) summary.append(el('p', 'Last checked ' + new Date(rentalCheckedAt).toLocaleTimeString('en-GB'), 'subtle'));
+    if (uncertain) summary.append(el('p', 'Could not confirm the latest status. Showing your last known rental.', 'service-note'), action('Refresh rental status', memberData, 'secondary small'));
+    const actions = el('div', null, 'home-context-actions');
+    actions.append(action('Find a return station', () => navigate('stations'), 'secondary'));
+    if (r.status === 'review_required') actions.append(action('Get help', () => supportForRental(r), 'secondary'));
+    summary.append(actions);
+    $('home-price-label').textContent = 'CURRENT RENTAL · ESTIMATE';
+    $('home-price').textContent = Number.isFinite(r.totalAmount) ? money(r.totalAmount, r.pricing?.currency || r.currency) : '—';
+    $('home-pricing-note').textContent = 'Latest recorded rental fee; final amount is confirmed after return. Test payments only; no real charge.';
+    return;
+  }
+  if (uncertain) {
+    const failed = accountLoadState === 'error' || rentalLoadState === 'error' || testStateFailed;
+    $('home-station-title').textContent = 'Your rental status';
+    summary.append(el('p', failed ? 'Your rental status could not be loaded.' : 'Checking for a current rental…'));
+    if (failed) summary.append(action('Try again', refreshSession, 'secondary'));
+    return;
+  }
+  $('home-station-title').textContent = 'Nearby stations';
+  if (nearbyLocation && Date.now() - nearbyLocation.at > 5 * 60 * 1000) { nearbyLocation = null; nearbyState = 'idle'; }
+  if (nearbyLocation) {
+    $('home-station-title').textContent = 'Nearby stations';
+    const live = session.user?.isTest ? stationData.liveStations || [] : stationData.stations || [];
+    const closest = live.filter(s => s.active !== false && stationCoordinates(s)).map(station => ({ station, distance: stationDistanceKm(nearbyLocation, stationCoordinates(station)) })).filter(s => s.distance <= nearbyRadiusKm).sort((a, b) => a.distance - b.distance)[0];
+    if (stationData.loadFailed || stationData.liveStationsError) summary.append(el('p', 'Station information could not be refreshed. Please try again.'), action('Refresh stations', stations, 'secondary'));
+    else if (closest) {
+      const { station, distance } = closest, d = station.device;
+      summary.append(el('strong', station.name, 'home-station-name'), el('p', (distance < 1 ? Math.round(distance * 1000) + ' m' : distance.toFixed(1) + ' km') + ' away · approximate straight-line distance'), el('p', station.address || 'Address coming soon'));
+      summary.append(el('span', d?.newRentalsPaused ? 'New rentals paused' : d?.connection === 'offline' ? 'Offline' : d?.connection === 'online' && d?.inventoryState === 'observed' ? 'Online · check station for availability' : 'Availability not confirmed', 'badge pending'));
+      const directions = el('a', 'Directions', 'button secondary'); directions.href = 'https://www.google.com/maps/dir/?api=1&destination=' + encodeURIComponent(station.latitude + ',' + station.longitude); directions.target = '_blank'; directions.rel = 'noopener noreferrer';
+      const actions = el('div', null, 'home-context-actions'); actions.append(directions); summary.append(actions);
+    } else summary.append(el('p', 'No mapped stations found within 5 km. See Stations for all locations.'));
+  } else {
+    summary.append(el('p', nearbyMessage || 'Use your location to see the closest station within 5 km.'));
+  }
+  const locate = action(nearbyState === 'loading' ? 'Finding your location…' : nearbyLocation ? 'Update my location' : 'Use my location', locateNearbyStations, 'secondary small'); locate.disabled = nearbyState === 'loading'; summary.append(locate);
+  summary.append(el('p', 'Location is used only on this page and is not saved to your account.', 'subtle'));
 }
 const el = (tag, text, cls) => { const n = document.createElement(tag); if (text != null) n.textContent = text; if (cls) n.className = cls; return n; };
 function supportOwner(user = session.user) { return user?.id ? `${user.isTest ? 'test' : 'live'}:${user.id}` : null; }
@@ -86,7 +191,7 @@ function restoreSupportDraft() {
 function renderSupportContext() {
   if (!supportContext) { supportContext = el('div', null, 'service-note'); supportContext.setAttribute('aria-live', 'polite'); $('support-form').append(supportContext); }
   supportContext.replaceChildren();
-  const label = el('p', supportRentalId ? `${session.user?.isTest ? 'TEST' : 'LIVE'} rental reference: ${supportRentalId}` : 'General help · No rental linked');
+  const label = el('p', supportRentalId ? `Rental reference: ${supportRentalId}` : 'General help · No rental linked');
   label.style.overflowWrap = 'anywhere'; supportContext.append(label);
   if (supportTicketId) { const ticket = el('p', `Replying to support case: ${supportTicketId}`); ticket.style.overflowWrap = 'anywhere'; supportContext.append(ticket, action('Start a new support case', () => { supportTicketId = null; supportAttempt = null; saveSupportDraft(); renderSupportContext(); }, 'secondary small')); }
   if (supportRentalId && !supportTicketId) supportContext.append(action('Clear rental link', () => { supportRentalId = null; supportAttempt = null; saveSupportDraft(); renderSupportContext(); }, 'secondary small'));
@@ -100,7 +205,7 @@ function renderSupportHistory(tickets) {
   for (const ticket of tickets) {
     const card = el('article', null, 'ticket'); card.style.overflowWrap = 'anywhere';
     card.append(el('span', ticket.status || 'Open', 'badge'));
-    if (ticket.rentalId) card.append(el('p', `${session.user?.isTest ? 'TEST' : 'LIVE'} rental reference: ${ticket.rentalId}`, 'subtle'));
+    if (ticket.rentalId) card.append(el('p', `Rental reference: ${ticket.rentalId}`, 'subtle'));
     card.append(el('p', ticket.message));
     const replies = Array.isArray(ticket.replies) && ticket.replies.length ? ticket.replies : ticket.reply ? [{ reply: ticket.reply }] : [];
     for (const reply of replies) {
@@ -131,7 +236,7 @@ function renderSupportHistory(tickets) {
   }
 }
 function clearMemberState(preserveDraft = false) {
-  testState = null; quote = null; hardwareHistory = []; stateVersion++; memberVersion++; stationVersion++; operationKeys.clear();
+  testState = null; quote = null; hardwareHistory = []; rentalLoadState = 'loading'; rentalCheckedAt = null; testStateFailed = false; stateVersion++; memberVersion++; stationVersion++; operationKeys.clear();
   supportAttempt = null; paymentMethod = 'card'; scanAfterLogin = false; closeSheet();
   if (preserveDraft) saveSupportDraft(); else forgetSupportDraft();
   if (!preserveDraft) { $('support-message').value = ''; supportRentalId = null; supportTicketId = null; } renderSupportContext(); $('support-status').textContent = ''; $('support-history').replaceChildren(); $('rental-flow').replaceChildren();
@@ -152,18 +257,20 @@ async function stations() {
     const isTest = Boolean(session.user?.isTest);
     const data = await api(isTest ? '/api/user/test/stations' : '/api/user/stations');
     if (isTest) {
-      try { data.liveStations = (await api('/api/user/stations')).stations || []; }
+      data.demoPricing = data.pricing;
+      data.pricing = null;
+      try { const live = await api('/api/user/stations'); data.liveStations = live.stations || []; data.pricing = live.pricing; }
       catch { data.liveStationsError = true; }
     }
     if (version !== stationVersion || member !== session.user) return; stationData = data; refreshHome(); renderStations();
-  } catch (error) { if (version !== stationVersion || member !== session.user) return; $('station-list').replaceChildren(empty('Stations could not be loaded.', 'Please refresh to try again.')); notice(error.message); } finally { button.disabled = false; }
+  } catch (error) { if (version !== stationVersion || member !== session.user) return; stationData.loadFailed = true; refreshHome(); $('station-list').replaceChildren(empty('Stations could not be loaded.', 'Please refresh to try again.')); notice(error.message); } finally { button.disabled = false; }
 }
 function renderStations() {
   const data = stationData, isTest = Boolean(session.user?.isTest);
   const list = $('station-list'); list.replaceChildren();
     const available = Array.isArray(data.stations) ? data.stations.filter(s => s.active !== false) : [];
     if (!available.length) list.append(empty('No stations available yet', 'Check back later.'));
-    for (const station of available) { const card = el('article', null, 'card station-card'); card.append(el('span', '↯', 'station-icon'), el('h3', station.name), el('p', station.address || 'Address coming soon'), el('span', isTest ? `${station.available ?? 0} available · TEST` : 'Power bank station', 'badge pending')); if (isTest) card.append(action(testState?.rental?.status === 'active' ? 'Return here · TEST' : testState?.rental ? 'View current rental' : 'Rent here · TEST', () => { if (testState?.rental?.status === 'active') confirmReturn(testState.rental); else if (testState?.rental) navigate('scan'); else requestQuote(station.id); })); else appendDeviceStatus(card, station.device); list.append(card); }
+    for (const station of available) { const card = el('article', null, 'card station-card'); card.append(el('span', '↯', 'station-icon'), el('h3', station.name), el('p', station.address || 'Address coming soon'), el('span', isTest ? `${station.available ?? 0} available · TEST` : 'Power bank station', 'badge pending')); if (isTest) card.append(action(testState?.rental?.status === 'active' ? 'Return here · TEST' : testState?.rental ? 'View current rental' : 'Rent here · TEST', () => { if (testState?.rental?.status === 'active') confirmReturn(testState.rental); else if (testState?.rental) navigate('scan'); else requestQuote(station.id); })); else { appendStationLocation(card, station); appendDeviceStatus(card, station.device); appendStationQr(card, station); } if (isTest && data.demoPricing) card.append(el('p', 'Demo only: ' + money(data.demoPricing.hourlyRate, data.demoPricing.currency) + ' / hour', 'subtle')); list.append(card); }
     if (isTest) {
       list.append(el('h3', 'Smile stations'));
       if (data.liveStationsError) list.append(empty('Device status could not be loaded.', 'Use Refresh to try again.'));
@@ -171,24 +278,70 @@ function renderStations() {
       for (const station of data.liveStations || []) {
         const card = el('article', null, 'card station-card');
         card.append(el('h3', station.name), el('p', station.address || 'Location not configured'), el('span', 'Power bank station', 'badge pending'));
-        appendDeviceStatus(card, station.device); list.append(card);
+        appendStationLocation(card, station); appendDeviceStatus(card, station.device); appendStationQr(card, station); list.append(card);
       }
     }
-    $('pricing').textContent = data.pricing ? `${isTest ? 'Test' : 'Planned'} pricing: ${money(data.pricing.hourlyRate, data.pricing.currency)} / hour · ${money(data.pricing.dailyCap, data.pricing.currency)} daily cap · ${money(data.pricing.deposit, data.pricing.currency)} deposit. Test payments only. Confirm station rates before renting.` : '';
+    $('pricing').textContent = data.pricing ? `Station pricing: ${money(data.pricing.hourlyRate, data.pricing.currency)} / hour · ${money(data.pricing.dailyCap, data.pricing.currency)} daily cap · ${money(data.pricing.deposit, data.pricing.currency)} deposit. Test payments only. Confirm station rates before renting.` : '';
 }
-function appendDeviceStatus(card, device) {
+function appendStationLocation(card, station) {
+  if (station.openingHours) card.append(el('p', 'Opening hours: ' + station.openingHours, 'station-location-notes'));
+  if (station.returnInstructions) card.append(el('p', 'Returns: ' + station.returnInstructions, 'station-location-notes'));
+  if (station.locationNotes) card.append(el('p', station.locationNotes, 'station-location-notes'));
+  const valid = (n, limit) => typeof n === 'number' && Number.isFinite(n) && Math.abs(n) <= limit;
+  if (!valid(station.latitude, 90) || !valid(station.longitude, 180)) {
+    card.append(el('p', 'Map location not configured yet.', 'subtle')); return;
+  }
+  const coords = encodeURIComponent(station.latitude + ',' + station.longitude), actions = el('div', null, 'station-map-actions');
+  for (const [label, url] of [
+    ['View on Google Maps ↗', 'https://www.google.com/maps/search/?api=1&query=' + coords],
+    ['Directions ↗', 'https://www.google.com/maps/dir/?api=1&destination=' + coords]
+  ]) {
+    const link = el('a', label, 'button secondary small'); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    link.setAttribute('aria-label', label.replace(' ↗', '') + ' — ' + station.name + ' (opens Google Maps)'); actions.append(link);
+  }
+  card.append(actions);
+}
+const cabinetDetailsOpen = new Set();
+function appendDeviceStatus(card, device, compact = false) {
   if (!device) { card.append(el('p', 'Device status not connected')); return; }
-  const connection = { online: 'Online at last refresh', offline: 'Last reported offline', unknown: 'Connection unknown' }[device.connection] || 'Connection unknown';
-  const state = { waiting: 'Waiting for device data', stale: 'Inventory outdated · current status unknown', observed: 'Recent inventory observation · availability unconfirmed' }[device.inventoryState] || 'Inventory unknown';
-  card.append(el('p', connection), el('p', state));
-  if (device.lastObservedAt) card.append(el('p', 'Last device update: ' + new Date(device.lastObservedAt).toLocaleString('en-GB')));
-  if (device.inventoryObservedAt) card.append(el('p', 'Inventory sampled: ' + new Date(device.inventoryObservedAt).toLocaleString('en-GB')));
-  if (device.observedBankCount !== null) card.append(el('p', String(device.observedBankCount) + ' power banks reported · not a rentable count'));
-  for (const bank of device.banks || []) card.append(el('p', `Slot ${bank.slot} · Reported battery ${bank.batteryPercent}%`));
-  card.append(el('p', 'Test payment only. Confirming a rental releases a real power bank.'));
-  const rentLink=el('a','Rent a power bank','button secondary');rentLink.href='/rent?cabinet='+encodeURIComponent(device.cabinetId);card.append(rentLink);
+  if (device.newRentalsPaused) card.append(el('p', 'New rentals paused. Existing rentals can still be returned when the station is accessible.', 'badge pending'));
+  const fresh = device.inventoryState === 'observed' && device.connection === 'online';
+  const banks = (device.banks || []).filter(b => Number.isInteger(b.slot) && b.slot > 0 && b.slot <= 128).sort((a,b) => a.slot-b.slot);
+  const panel = el('section', null, 'cabinet-status' + (compact ? ' cabinet-compact' : ''));
+  const status = el('div', null, 'cabinet-status-line');
+  status.append(el('span', device.connection === 'offline' ? 'Offline' : fresh ? 'Online' : 'Status unknown', 'cabinet-connection ' + (fresh ? 'is-online' : 'is-unknown')),
+    el('span', banks.length ? banks.length + ' reported' : 'Awaiting update', 'cabinet-count'));
+  const figure = el('figure', null, 'cabinet-figure' + (fresh ? '' : ' is-stale'));
+  const housing = el('div', null, 'cabinet-housing');
+  const mast = el('div', null, 'cabinet-mast'); mast.append(el('strong', 'Smile'), el('span', 'POWER BANK STATION'));
+  const slots = el('div', null, 'cabinet-slots'); slots.setAttribute('role','list'); slots.setAttribute('aria-label','Reported power bank slots');
+  for (const bank of banks) {
+    const tone = !fresh ? 'unknown' : bank.batteryPercent < 50 ? 'low' : 'present';
+    const meaning = !fresh ? 'Last seen' : bank.batteryPercent < 50 ? 'Low battery' : 'Present';
+    const slot = el('div', null, 'cabinet-slot is-' + tone); slot.setAttribute('role','listitem');
+    slot.setAttribute('aria-label', 'Slot ' + bank.slot + ', ' + meaning.toLowerCase() + ', reported battery ' + bank.batteryPercent + ' percent');
+    const well = el('div', null, 'cabinet-well'), bankArt = el('div', null, 'cabinet-bank'); bankArt.setAttribute('aria-hidden','true');
+    bankArt.append(el('span', '↯')); well.append(bankArt);
+    const light = el('span', null, 'cabinet-led'); light.setAttribute('aria-hidden','true');
+    slot.append(well, light, el('strong', 'Slot ' + bank.slot), el('span', bank.batteryPercent + '%', 'cabinet-battery'), el('span',meaning,'cabinet-slot-label')); slots.append(slot);
+  }
+  if (!banks.length) { const waiting=el('div','Waiting for device data','cabinet-waiting'); slots.append(waiting); }
+  housing.append(mast,slots,el('div',null,'cabinet-base')); figure.append(housing,el('figcaption',fresh?'Reported slots · lights show presence, not availability':'Last known slots · current availability unknown'));
+  panel.append(status,figure);
+  const details=el('details',null,'cabinet-details'); const detailKey=(compact?'home:':'stations:')+device.cabinetId; details.open=cabinetDetailsOpen.has(detailKey); details.addEventListener('toggle',()=>{if(details.open)cabinetDetailsOpen.add(detailKey);else cabinetDetailsOpen.delete(detailKey);}); details.append(el('summary','Station details'));
+  const connection = {online:'Online at last refresh',offline:'Last reported offline',unknown:'Connection unknown'}[device.connection] || 'Connection unknown';
+  details.append(el('p',connection),el('p',fresh?'Availability is checked before you confirm a rental.':device.inventoryState==='waiting'?'Waiting for device data':'Inventory outdated · current status unknown'));
+  if(device.lastObservedAt)details.append(el('p','Last device update: '+new Date(device.lastObservedAt).toLocaleString('en-GB')));
+  if(device.inventoryObservedAt)details.append(el('p','Inventory sampled: '+new Date(device.inventoryObservedAt).toLocaleString('en-GB')));
+  for(const bank of banks)details.append(el('p',`Slot ${bank.slot} · Reported battery ${bank.batteryPercent}%`));
+  details.append(el('p','Only reported positions are shown; this diagram does not specify the cabinet’s total capacity.'));
+  panel.append(details);
+  const rentLink=el('a',fresh?'Rent a power bank':'Check station','button secondary');rentLink.href='/rent?cabinet='+encodeURIComponent(device.cabinetId);panel.append(rentLink);
+  card.append(panel);
 }
+
 function account() {
+  accountLoadState = 'ready';
   restoreSupportDraft();
   const testExperience = Boolean(session.user?.isTest || (!session.user && session.readiness?.googleTest?.ready));
   $('experience-label').textContent = testExperience ? 'TEST EXPERIENCE' : 'CHARGE ON THE GO';
@@ -201,7 +354,7 @@ function account() {
   const container = $('account-content'); container.replaceChildren();
   if (!session.user) {
     container.append(el('h3', 'Sign in'), el('p', 'Choose how to continue.'));
-    if (session.readiness?.google?.ready) { const link = el('a', 'Continue with Google', 'button dark'); link.href = '/auth/google'; link.addEventListener('click', rememberLoginRoute); container.append(link); }
+    if (session.readiness?.google?.ready) { const link = el('a', null, 'google-signin'), icon = el('img'); icon.src = '/google-signin.png'; icon.alt = ''; icon.width = 177; icon.height = 40; link.append(icon, el('span', 'Sign in with Google', 'google-signin-label')); link.href = '/auth/google'; link.addEventListener('click', rememberLoginRoute); container.append(link); }
     else container.append(el('div', 'Google sign-in is unavailable', 'service-note'));
     if (session.readiness?.googleTest?.ready) {
       container.append(el('div', 'TEST · No real charge. This does not sign in to Google.', 'service-note'));
@@ -212,7 +365,7 @@ function account() {
         try {
           const challenge = await api('/api/user/test-login-challenge');
           await api('/api/user/test-login', { method: 'POST', body: '{}', headers: { 'X-CSRF-Token': challenge.csrf } });
-          session = await api('/api/user/session'); savedLoginRoute(true); account(); if (navigationVersion === loginNavigation) navigate(afterLogin); afterLogin = 'home'; const landedNavigation = navigationVersion; await memberData(); await stations(); if (navigationVersion === landedNavigation && view === 'home' && testState?.rental) navigate('scan'); if (navigationVersion === landedNavigation && view === 'scan' && scanAfterLogin && !testState?.rental && !quote) { scanAfterLogin = false; await startCamera(); } else scanAfterLogin = false;
+          session = await api('/api/user/session'); savedLoginRoute(true); account(); if (navigationVersion === loginNavigation) navigate(afterLogin); afterLogin = 'home'; const landedNavigation = navigationVersion; await memberData(); await stations(); if (navigationVersion === landedNavigation && view === 'scan' && scanAfterLogin && !testState?.rental && !quote) { scanAfterLogin = false; await startCamera(); } else scanAfterLogin = false;
         } catch (error) { notice(error.message); testLogin.disabled = false; }
       });
       container.append(testLogin);
@@ -224,15 +377,19 @@ function account() {
     const logout = el('button', 'Sign out', 'button secondary small'); logout.type = 'button'; logout.addEventListener('click', async () => { logout.disabled = true; try { await api('/api/user/logout', { method: 'POST', body: '{}' }); clearMemberState(); session = { ...session, user: null, csrf: null }; afterLogin = 'home'; account(); navigate('home'); await stations(); $('support-history').replaceChildren(); } catch (error) { notice(error.message); logout.disabled = false; } }); container.append(logout);
     $('account-button').textContent = (session.user.name || 'U').charAt(0); $('account-button').setAttribute('aria-label', 'Your account');
   }
-  showScreen();
+  showScreen(); refreshHome();
 }
 async function memberData() {
   if (!session.user) return;
   const member = session.user, version = ++memberVersion;
+  if (rentalLoadState !== 'ready') { rentalLoadState = 'loading'; refreshHome(); }
   if (session.user.isTest) await loadTestState();
   const results = await Promise.allSettled([api('/api/user/rentals'), api('/api/user/support')]);
   if (session.user !== member || version !== memberVersion) return;
-  hardwareHistory = results[0].status === 'fulfilled' ? (results[0].value.hardwareRentals || []) : [];
+  rentalLoadState = results[0].status === 'fulfilled' ? 'ready' : 'error';
+  if (results[0].status === 'fulfilled') { hardwareHistory = results[0].value.hardwareRentals || []; rentalCheckedAt = results[0].value.serverNow || new Date().toISOString(); }
+  const helpId=new URLSearchParams(globalThis.location?.search||'').get('supportRental');
+  if(helpId&&!supportRentalId&&!supportTicketId&&hardwareHistory.some(r=>r.id===helpId)){supportRentalId=helpId;saveSupportDraft();renderSupportContext();}
   refreshHome();
   const rentals = $('rentals'); rentals.replaceChildren();
   if (session.user.isTest) {
@@ -257,10 +414,10 @@ async function loadTestState(confirmedNotice = null) {
   try {
     const state = await api('/api/user/test/state');
     if (session.user !== member || version !== stateVersion) return;
-    testState = state; if (state.rental) quote = null; clockOffset = Date.parse(state.serverNow) - Date.now();
+    testStateFailed = false; testState = state; if (state.rental) quote = null; clockOffset = Date.parse(state.serverNow) - Date.now();
     if (!Number.isFinite(clockOffset)) clockOffset = 0;
     renderFlow(); renderHistory(state.rentals || []); refreshHome(); renderStations();
-  } catch (error) { if (session.user !== member || version !== stateVersion) return; if (typeof confirmedNotice === 'string' && confirmedNotice) notice(confirmedNotice + ' Latest history could not be refreshed. Use Refresh in Rentals to try again.'); else showFlowError(error); if (!testState) $('rental-flow').replaceChildren(empty('Rental unavailable', 'Refresh to try again.'), action('Try again', loadTestState)); }
+  } catch (error) { if (session.user !== member || version !== stateVersion) return; testStateFailed = true; refreshHome(); if (typeof confirmedNotice === 'string' && confirmedNotice) notice(confirmedNotice + ' Latest history could not be refreshed. Use Refresh in Rentals to try again.'); else showFlowError(error); if (!testState) $('rental-flow').replaceChildren(empty('Rental unavailable', 'Refresh to try again.'), action('Try again', loadTestState)); }
 }
 async function mutate(kind, body) {
   const identity = kind + ':' + JSON.stringify(body);
@@ -395,7 +552,7 @@ function updateClock() {
   if (cost) cost.textContent = money(total, rental.pricing.currency);
 }
 function appendHardwareHistory(list) {
-  const labels = {pending_payment:'Awaiting confirmation',dispatching:'Releasing',active:'In use',completed:'Returned',cancelled:'Cancelled',review_required:'Needs review'};
+  const labels = {pending_payment:'Awaiting confirmation',dispatching:'Releasing',active:'In use',completed:'Returned',bought_out:'Bought out',cancelled:'Cancelled',review_required:'Needs review'};
   for (const r of hardwareHistory) {
     const row=el('article',null,'card hardware-order'),top=el('div',null,'hardware-order-top');
     top.append(el('strong',r.slot?'Power bank · Slot '+r.slot:'Power bank rental'),el('span',labels[r.status]||'Needs review','badge'));
@@ -404,7 +561,8 @@ function appendHardwareHistory(list) {
     const seconds=r.durationSeconds||0;
     metrics.append(el('span',r.startedAt?`${Math.floor(seconds/3600)}h ${Math.floor(seconds/60)%60}m`:'Timer has not started'),el('strong',money(r.totalAmount,r.pricing?.currency)));
     row.append(metrics,el('p',(r.startedAt?new Date(r.startedAt).toLocaleString('en-GB'):'Awaiting confirmation')+' · Test payment','subtle'));
-    const link=el('a',r.status==='active'?'View rental':'Rental details','button secondary small');link.href='/rent?cabinet='+encodeURIComponent(r.cabinetId)+'&order='+encodeURIComponent(r.id)+(r.status==='active'?'':'#orders');row.append(link);list.append(row);
+    if(r.status==='bought_out')row.append(el('p',r.returnedAt?'Returned after buyout · Settlement review':'Billing stopped · Power bank not returned','subtle'));
+    const link=el('a',r.status==='active'?'View rental':'Rental details','button secondary small');link.href='/rent?cabinet='+encodeURIComponent(r.cabinetId)+'&order='+encodeURIComponent(r.id)+(r.status==='active'?'':'#orders');row.append(link,action('Get help with rental',()=>supportForRental(r),'secondary small'));list.append(row);
   }
 }
 function renderHistory(rows) {
@@ -590,7 +748,7 @@ async function refreshSession() {
       clearMemberState(!session.user || !next.user || next.user.id === session.user?.id); session = next; account();
       if (!session.user && ['scan', 'support'].includes(previousView)) { afterLogin = previousView; navigate('profile'); }
     }
-    await memberData(); await stations();
+    accountLoadState = 'ready'; refreshHome(); await memberData(); await stations();
   } catch (error) { notice('Could not refresh your session. Please try again.'); }
   finally { refreshing = false; }
 }
@@ -600,8 +758,57 @@ document.addEventListener?.('visibilitychange', () => { if (document.visibilityS
 
 (async () => {
   if (location.pathname === '/auth/error') { const code = new URLSearchParams(location.search).get('code'); const errors = { not_configured: 'Google sign-in is unavailable', google_not_configured: 'Google sign-in is unavailable', access_denied: 'Google sign-in was canceled. You can try again when you’re ready.', invalid_state: 'Your sign-in session expired. Please try again.', oauth_failed: 'Google sign-in could not be completed. Please try again.' }; notice(errors[code] || 'We couldn’t complete Google sign-in. Please try again or contact support.'); }
-  try { session = await api('/api/user/session'); const loginRoute = savedLoginRoute(Boolean(session.user)); if (loginRoute) afterLogin = loginRoute; account(); navigate(location.pathname === '/auth/error' ? 'profile' : String(location.hash || '#' + (session.user && loginRoute ? loginRoute : 'home')).slice(1), false); const initialNavigation = navigationVersion; await memberData(); if (navigationVersion === initialNavigation && !location.hash && view === 'home' && testState?.rental) navigate('scan'); } catch (error) { $('account-content').replaceChildren(empty('Your account is unavailable.', 'Please refresh the page to try again.')); notice('We couldn’t check your sign-in status. Please refresh to try again.'); }
+  try { session = await api('/api/user/session'); const loginRoute = savedLoginRoute(Boolean(session.user)); if (loginRoute) afterLogin = loginRoute; account(); navigate(location.pathname === '/auth/error' ? 'profile' : String(location.hash || '#' + (session.user && loginRoute ? loginRoute : 'home')).slice(1), false); await memberData(); } catch (error) { accountLoadState = 'error'; refreshHome(); $('account-content').replaceChildren(empty('Your account is unavailable.', 'Please refresh the page to try again.')); notice('We couldn’t check your sign-in status. Please refresh to try again.'); }
   await stations();
 })();
 
-if (typeof setInterval === 'function') setInterval(() => { if (document.visibilityState !== 'hidden' && ['home', 'stations'].includes(view) && !busy && !$('refresh-stations').disabled) stations(); }, 30000);
+if (typeof setInterval === 'function') setInterval(() => { if (document.visibilityState !== 'hidden' && ['home', 'stations'].includes(view) && !busy && !$('refresh-stations').disabled) refreshSession(); }, 30000);
+
+// Refresh replies while the support page is open without discarding an in-progress reply.
+if(typeof setInterval==='function')setInterval(()=>{
+ if(!session.user||view!=='support'||document.visibilityState==='hidden'||supportBusy||refreshing)return;
+ if(document.activeElement?.tagName==='TEXTAREA'||[...($('support-history').querySelectorAll?.('textarea')||[])].some(n=>n.value))return;
+ refreshSession();
+},10000);
+
+
+const stationQrOpen = new Set();
+function appendStationQr(card, station) {
+  const id = station.cabinetId;
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id || '')) return;
+  const details = el('details', null, 'station-qr');
+  const summary = el('summary', 'View cabinet QR code');
+  const content = el('div', null, 'station-qr-content');
+  details.append(summary, content); details.open = stationQrOpen.has(id);
+  let loading = false, loaded = false;
+  async function loadQr() {
+    if (loading || loaded) return;
+    loading = true; content.replaceChildren(el('p', 'Loading QR code…', 'subtle'));
+    try {
+      const endpoint = '/api/user/station-qr?cabinet=' + encodeURIComponent(id);
+      const result = await api(endpoint);
+      const image = el('img'); image.alt = 'Rental QR code for ' + result.cabinetId;
+      image.width = 240; image.height = 240;
+      const status = el('p', '', 'form-status'); status.setAttribute('role', 'status');
+      const actions = el('div', null, 'station-qr-actions');
+      const save = el('a', 'Save QR image', 'button secondary small'); save.href = endpoint + '&format=png&download=1'; save.download = 'Smile-' + id + '-QR.png';
+      const open = el('a', 'Open rental page', 'button secondary small'); open.href = result.url;
+      const input = el('input'); input.type = 'text'; input.value = result.url; input.readOnly = true; input.setAttribute('aria-label', 'Cabinet rental link');
+      const copy = action('Copy rental link', async () => {
+        try {
+          if (!globalThis.navigator?.clipboard?.writeText) throw new Error('Clipboard unavailable');
+          await globalThis.navigator.clipboard.writeText(result.url); status.textContent = 'Rental link copied.';
+        } catch { input.focus(); input.select(); status.textContent = 'Select and copy the rental link below.'; }
+      }, 'secondary small');
+      image.addEventListener('error', () => { image.hidden = true; save.hidden = true; status.textContent = 'QR image unavailable. Close and reopen this section to retry.'; loaded = false; });
+      image.src = endpoint + '&format=png';
+      actions.append(save, copy, open);
+      content.replaceChildren(el('strong', result.stationName || station.name), el('p', 'Cabinet ' + result.cabinetId, 'station-qr-id'), image,
+        el('p', 'Scan with another phone, or open the rental page on this phone. Availability is checked before you confirm.', 'subtle'), actions, input, status);
+      loaded = true;
+    } catch (error) { content.replaceChildren(el('p', 'QR code unavailable. Close and reopen to retry.', 'subtle')); }
+    finally { loading = false; }
+  }
+  details.addEventListener('toggle', () => { if (details.open) { stationQrOpen.add(id); loadQr(); } else stationQrOpen.delete(id); });
+  card.append(details); if (details.open) loadQr();
+}

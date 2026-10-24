@@ -1,4 +1,5 @@
-import {reconcileHardwareEvent} from './production-hardware-rental.mjs';
+import {cabinetControl,assertNewRentalAllowed} from './production-cabinet-control.mjs';
+import {reconcileHardwareEvent,blockingHardwareCommand} from './production-hardware-rental.mjs';
 /** WsCharge HTTP gateway. Supplier command acceptance is never physical pickup.
  * Callback POST/JSON, shared token and Unix-second freshness are a local ingress
  * contract requiring supplier confirmation, not a claimed vendor signature scheme.
@@ -45,7 +46,8 @@ export function wschargeCabinets(db, config, time = Date.now()) {
     const connection = offline ? 'offline' : connectionEvent && time - connectionEvent.observedAtSeconds * 1000 <= 120000 ? 'online' : 'unknown';
     const changed = sample && rows.some(e => [65,66,80,81,67,90].includes(e.code) && e.observedAtSeconds >= sample.observedAtSeconds);
     const stale = Boolean(sample && (time - sample.observedAtSeconds * 1000 > 120000 || changed || offline));
-    return { cabinetId, gatewayEnabled: config.wschargeEnabled === true,
+    const station=listRecords(db,'station').find(s=>s.cabinetId===cabinetId);
+    return { cabinetId, newRentalsPaused:cabinetControl(db,cabinetId).paused, station:station?{name:station.name,openingHours:station.openingHours||'',returnInstructions:station.returnInstructions||'',capacity:station.capacity??null}:null, gatewayEnabled: config.wschargeEnabled === true,
       connection: config.wschargeEnabled ? connection : 'unknown',
       inventoryState: !sample ? 'waiting' : stale || !config.wschargeEnabled ? 'stale' : 'observed',
       lastObservedAt: latest ? iso(latest.observedAtSeconds * 1000) : null,
@@ -218,7 +220,8 @@ export async function sendWschargeCommand({db,config,actor,body,idempotencyKey,t
     return {command:get(db,'wscharge_command',previous.commandId),replayed:true};
   }
   const command=transaction(db,()=>{
-    if (body.code===65 && listRecords(db,'wscharge_command').some(c=>c.code===65 && c.cabinetId===body.cabinetId && !c.reconciledAt)) fail(409,'Prior pickup command requires manual supplier reconciliation; automatic re-dispatch is blocked');
+    if(body.code===65)assertNewRentalAllowed(db,body.cabinetId);
+    if (body.code===65 && listRecords(db,'wscharge_command').some(c=>rentalId?blockingHardwareCommand(db,c,body.cabinetId,slot):c.code===65 && c.cabinetId===body.cabinetId && !c.reconciledAt)) fail(409,'Prior pickup command requires manual supplier reconciliation; automatic re-dispatch is blocked');
     const c={id:randomUUID(),code:body.code,cabinetId:body.cabinetId,slot,createdAt:iso(time),actorId:actor.id,status:'unknown',physicalPickupConfirmed:false};
     if(rentalId){
       const r=get(db,'hardware_rental',rentalId);

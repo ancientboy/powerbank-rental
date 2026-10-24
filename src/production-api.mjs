@@ -1,4 +1,6 @@
-import {hardwareOrders,hardwareState,hardwareAdmin,authorizeHardware,handleHardware,reconcileManualCommand} from './production-hardware-rental.mjs';
+import { cabinetQrResponse, validCabinetId } from './production-cabinet-qr.mjs';
+import {saveCabinetControl,cabinetControl} from './production-cabinet-control.mjs';
+import {hardwarePricing,hardwareOrders,hardwareState,hardwareAdmin,authorizeHardware,handleHardware,reconcileManualCommand,maintainHardware,resolveHardwareOrder} from './production-hardware-rental.mjs';
 import { WSCHARGE_NOTIFY_PATH, receiveWscharge, wschargeView, sendWschargeCommand, wschargeCabinets, customerStations } from './production-wscharge.mjs';
 import { integrationView, applyIntegrationScenario, resolveIntegrationException, reconcileIntegrationRun, retryIntegrationRefund } from './production-integrations.mjs';
 import { supportView, auditView, pricingHistory, operationQueue, orderResponse } from './production-operations.mjs';
@@ -221,6 +223,11 @@ export function createProductionAPI({
       if (path.startsWith("/api/admin/")) {
         const s = requireSession(req, "admin");
         if (method !== "GET") csrf(req, s);
+        if (path === '/api/admin/cabinet-qr' && method === 'GET') return cabinetQrResponse(db, config, u.searchParams);
+        maintainHardware(db,now());
+        if(path==='/api/admin/hardware/control'&&method==='POST'){rate('write:'+s.subject,120,60000);return json(saveCabinetControl(db,config,s.user,body,now()));}
+        if(path==='/api/admin/hardware/resolve'&&method==='POST'){rate('write:'+s.subject,120,60000);return json(resolveHardwareOrder(db,s.user,body,now(),wschargeCabinets(db,config,now())));}
+        if(path==='/api/admin/hardware/refresh'&&method==='POST'){if(!['owner','operator'].includes(s.user.role))fail(403,'Your role cannot perform this action');rate('hardware-refresh:'+s.subject,12,60000);return json(await sendWschargeCommand({db,config,actor:{id:s.subject,role:'owner'},body:{code:64,cabinetId:body.cabinetId},idempotencyKey:'review-'+randomUUID(),time:now(),fetchImpl:wschargeFetch}));}
         if(path==='/api/admin/hardware-test'&&method==='GET')return json(hardwareAdmin(db,config,now()));
         if(path==='/api/admin/hardware-test/authorize'&&method==='POST')return json(authorizeHardware(db,s.user,body,now()));
         if(path==='/api/admin/hardware-test/reconcile'&&method==='POST')return json(reconcileManualCommand(db,s.user,body.commandId,now()));
@@ -229,6 +236,11 @@ export function createProductionAPI({
           if (s.user.role !== 'owner') fail(403, 'Owner role required');
           rate('wscharge:' + s.subject, 30, 60000);
           return json(await sendWschargeCommand({ db, config, actor: s.user, body, idempotencyKey: req.headers.get('idempotency-key'), time: now(), fetchImpl: wschargeFetch }));
+        }
+        if(path==='/api/admin/notifications'&&method==='GET'){
+          const pending=listRecords(db,'support').filter(t=>['open','in_progress'].includes(t.status));
+          const queue=operationQueue(db).filter(i=>i.type==='hardware_review');
+          return json({openSupport:pending.length,newCustomerMessages:pending.filter(t=>t.status==='open').length,hardwareReview:queue.length,version:pending.map(t=>t.id+':'+(t.updatedAt||t.createdAt)).sort().join('|')+';'+queue.map(i=>i.id+':'+i.reason).sort().join('|')});
         }
         if (path === "/api/admin/session" && method === "GET")
           return json({ user: s.user, csrf: s.csrf });
@@ -274,7 +286,7 @@ export function createProductionAPI({
               testUsers: Number(db.prepare('SELECT count(*) AS n FROM test_users').get().n),
             },
             stations: listRecords(db, "station"),
-            deviceCabinets: wschargeCabinets(db, config, now()),
+            deviceCabinets: wschargeCabinets(db, config, now()).map(c=>({...c,control:cabinetControl(db,c.cabinetId)})),
             users: db
               .prepare(
                 "SELECT id,email,name,created_at,'google' AS provider,0 AS isTest FROM users UNION ALL SELECT id,NULL AS email,name,created_at,'google_test' AS provider,1 AS isTest FROM test_users ORDER BY created_at DESC",
@@ -286,10 +298,12 @@ export function createProductionAPI({
             testStations: googleTestEnabled(config) ? testStations : [],
             rentals: listRecords(db, "rental"),
             payments: listRecords(db, "payment"),
-            support: listRecords(db, "support").map(supportView),
+            support: listRecords(db, "support").map(supportView).sort((a,b)=>String(b.updatedAt||b.createdAt).localeCompare(String(a.updatedAt||a.createdAt))),
+            hardwareRentals:hardwareOrders(db).map(r=>estimateTestRental(r,now())),
             workQueue: operationQueue(db),
             pricingHistory: pricingHistory(db, pricing()),
             audit: auditView(db),
+            hardwarePricing:hardwarePricing(db),
             pricing: pricing(),
             readiness: readiness(config),
           });
@@ -314,7 +328,7 @@ export function createProductionAPI({
             if (body.id && !existing) fail(404, "Station not found");
             if (Object.hasOwn(body, "expectedUpdatedAt") && body.expectedUpdatedAt !== (existing?.updatedAt || null))
               fail(409, "Station changed. Reload before saving your edits.");
-            for (const [field, limit] of [["name", 200], ["address", 500], ["cabinetId", 80]]) {
+            for (const [field, limit] of [["name", 200], ["address", 500], ["cabinetId", 80], ["locationNotes", 500], ["openingHours", 300], ["returnInstructions", 500]]) {
               if (typeof body[field] === "string" && body[field].trim().length > limit)
                 fail(400, `${field} must be at most ${limit} characters`);
             }
@@ -326,6 +340,10 @@ export function createProductionAPI({
               id,
               name: text(body.name),
               address: text(body.address, 500),
+              locationNotes: Object.hasOwn(body, "locationNotes") ? text(body.locationNotes, 500) : (existing?.locationNotes || ""),
+              openingHours: Object.hasOwn(body,"openingHours") ? text(body.openingHours,300) : (existing?.openingHours || ""),
+              returnInstructions: Object.hasOwn(body,"returnInstructions") ? text(body.returnInstructions,500) : (existing?.returnInstructions || ""),
+              capacity: Object.hasOwn(body,"capacity") ? body.capacity : (existing?.capacity ?? null),
               cabinetId: text(body.cabinetId, 80),
               latitude:
                 (typeof body.latitude === "string" && !body.latitude.trim()) || body.latitude == null
@@ -338,6 +356,8 @@ export function createProductionAPI({
               active: body.active === true,
               updatedAt: new Date(Math.max(now(), (Date.parse(existing?.updatedAt) || 0) + 1)).toISOString(),
             };
+            if (station.cabinetId && station.cabinetId !== existing?.cabinetId && !validCabinetId(station.cabinetId)) fail(400, "Cabinet ID must use 1–64 letters, numbers, underscores or hyphens.");
+            if (station.capacity !== null && (!Number.isInteger(station.capacity) || station.capacity < 1 || station.capacity > 128)) fail(400,"Total slots must be an integer from 1 to 128, or blank");
             if (
               !station.name ||
               !station.address ||
@@ -371,19 +391,23 @@ export function createProductionAPI({
               hourlyRate: Number(body.hourlyRate),
               dailyCap: Number(body.dailyCap),
               deposit: Number(body.deposit),
+              totalCap: Number(body.totalCap??body.deposit),
+              maxRentalDays: Number(body.maxRentalDays??0),
+              policyVersion: 1,
               version: randomUUID(),
               updatedAt: new Date(Math.max(now(), (Date.parse(pricing()?.updatedAt) || 0) + 1)).toISOString(),
             };
             if (
               body.currency !== "ARS" ||
-              ![p.hourlyRate, p.dailyCap, p.deposit].every(
+              ![p.hourlyRate, p.dailyCap, p.deposit, p.totalCap].every(
                 (x) => Number.isSafeInteger(x) && x > 0 && x <= 100000000,
               ) ||
-              p.dailyCap < p.hourlyRate
+              p.dailyCap < p.hourlyRate || p.totalCap > p.deposit || p.totalCap < p.hourlyRate ||
+              !Number.isInteger(p.maxRentalDays) || p.maxRentalDays < 0 || p.maxRentalDays > 365
             )
               fail(
                 400,
-                "Prices must be positive integer minor units; daily cap must cover one hour",
+                "Prices must be positive integer minor units; caps must cover one hour; total cap must not exceed deposit; maximum days must be 0–365",
               );
             const before = pricing();
             transaction(db, () => {
@@ -401,7 +425,7 @@ export function createProductionAPI({
           if (!ticket) fail(404, "Support case not found");
           if (Object.hasOwn(body, "expectedUpdatedAt") && body.expectedUpdatedAt !== (ticket.updatedAt || null))
             fail(409, "Support case changed. Reload before saving your edits.");
-          if (!["open", "in_progress", "resolved"].includes(body.status))
+          if (!["open", "in_progress", "resolved", "closed"].includes(body.status))
             fail(400, "Invalid support status");
           if (typeof body.reply === "string" && body.reply.trim().length > 4000)
             fail(400, "Support reply must be at most 4000 characters");
@@ -474,13 +498,16 @@ export function createProductionAPI({
         rate("oauth-start", 100, 60000);
         const flow = await google.beginGoogle(config),
           binding = random();
-        db.prepare("INSERT INTO oauth_states VALUES(?,?,?,?,?)").run(
-          digest(flow.state),
-          digest(binding),
-          flow.nonce,
-          flow.verifier,
-          now() + 600000,
-        );
+        const cabinet = u.searchParams.get("cabinet") || "";
+        transaction(db, () => {
+          db.prepare("INSERT INTO oauth_states VALUES(?,?,?,?,?)").run(
+            digest(flow.state), digest(binding), flow.nonce, flow.verifier, now() + 600000,
+          );
+          if (/^[A-Za-z0-9_-]{1,64}$/.test(cabinet))
+            db.prepare("INSERT INTO oauth_return_paths VALUES(?,?)").run(
+              digest(flow.state), "/rent?cabinet=" + encodeURIComponent(cabinet),
+            );
+        });
         return new Response(null, {
           status: 303,
           headers: {
@@ -493,11 +520,16 @@ export function createProductionAPI({
       if (path === "/auth/google/callback" && method === "GET") {
         const state = u.searchParams.get("state") || "",
           binding = cookies(req).voltgo_oauth || "";
-        const flow = db
-          .prepare(
+        let returnPath = "/";
+        const flow = transaction(db, () => {
+          const destination = db.prepare("SELECT path FROM oauth_return_paths WHERE state_hash=?").get(digest(state));
+          const consumed = db.prepare(
             "DELETE FROM oauth_states WHERE state_hash=? AND binding_hash=? AND expires>? RETURNING *",
-          )
-          .get(digest(state), digest(binding), now());
+          ).get(digest(state), digest(binding), now());
+          if (consumed && /^\/rent\?cabinet=[A-Za-z0-9_-]{1,64}$/.test(destination?.path || ""))
+            returnPath = destination.path;
+          return consumed;
+        });
         if (
           !flow ||
           !state ||
@@ -539,7 +571,7 @@ export function createProductionAPI({
             );
           const s = newSession(req, "user", user.id),
             headers = new Headers({
-              Location: "/",
+              Location: returnPath,
               "Cache-Control": "no-store",
             });
           headers.append("Set-Cookie", s.header);
@@ -564,16 +596,29 @@ export function createProductionAPI({
           readiness: readiness(config),
         });
       }
+      if (path === '/api/user/station-qr' && method === 'GET') {
+        const id = u.searchParams.get('cabinet');
+        if (!validCabinetId(id)) fail(400, 'Invalid cabinet ID');
+        // Only cabinets already visible in the customer listing may be shared.
+        const station = customerStations(db, config, now()).find(row => row.cabinetId === id);
+        if (!station) fail(404, 'Station not available');
+        const format = u.searchParams.get('format') || 'json';
+        if (!['json', 'png'].includes(format)) fail(400, 'Choose PNG');
+        if (format === 'png') return cabinetQrResponse(db, config, u.searchParams);
+        const url = new URL('/rent', config.publicOrigin); url.searchParams.set('cabinet', id);
+        return json({ cabinetId: id, stationName: station.name, url: url.href });
+      }
       if (path === "/api/user/stations" && method === "GET")
         return json({
           stations: customerStations(db, config, now()),
           serverNow: new Date(now()).toISOString(),
-          pricing: pricing(),
+          pricing: hardwarePricing(db),
         });
       if (path.startsWith("/api/user/")) {
         const s = requireSession(req, "user");
         if (method !== "GET") csrf(req, s);
         if(path.startsWith('/api/user/hardware/')){
+          maintainHardware(db,now());
           const cabinets=wschargeCabinets(db,config,now());
           if(path==='/api/user/hardware/state'&&method==='GET')return json(hardwareState(db,config,s.subject,now(),cabinets));
           if(method!=='POST')fail(404,'Not found');
@@ -617,7 +662,7 @@ export function createProductionAPI({
             rate('support-reply:' + s.subject, 30, 3600000);
             ticket.updatedAt = new Date(Math.max(now(), (Date.parse(ticket.updatedAt) || 0) + 1)).toISOString();
             ticket.replies.push({ id: randomUUID(), reply: message, createdAt: ticket.updatedAt, actorId: s.subject, actorRole: 'customer' });
-            if (ticket.status === 'resolved') ticket.status = 'open';
+            ticket.status = 'open';
             putRecord(db, 'support', ticket.id, ticket, s.subject);
             putRecord(db, 'support_reply_request', receiptId, { fingerprint }, s.subject);
             return ticket;
@@ -635,9 +680,10 @@ export function createProductionAPI({
           if (body.rentalId != null && (typeof body.rentalId !== 'string' || body.rentalId.length > 160)) fail(400, 'Invalid rental reference');
           const rentalId = typeof body.rentalId === 'string' ? body.rentalId.trim() || null : null;
           if (rentalId) {
-            const linked = s.user.isTest
+            const hardwareLinked=db.prepare("SELECT id FROM records WHERE kind='hardware_rental' AND id=? AND owner_id=?").get(rentalId,s.subject);
+            const linked = hardwareLinked || (s.user.isTest
               ? db.prepare('SELECT id FROM test_rentals WHERE id=? AND owner_id=?').get(rentalId, s.subject)
-              : db.prepare("SELECT id FROM records WHERE kind='rental' AND id=? AND owner_id=?").get(rentalId, s.subject);
+              : db.prepare("SELECT id FROM records WHERE kind='rental' AND id=? AND owner_id=?").get(rentalId, s.subject));
             if (!linked) fail(404, 'Rental not found');
           }
           const key = req.headers.get("idempotency-key");
@@ -658,6 +704,7 @@ export function createProductionAPI({
             userId: s.subject,
             message,
             rentalId,
+            rentalMode:rentalId&&db.prepare("SELECT id FROM records WHERE kind='hardware_rental' AND id=? AND owner_id=?").get(rentalId,s.subject)?'hardware':s.user.isTest?'test':'live',
             replies: [],
             status: "open",
             reply: "",

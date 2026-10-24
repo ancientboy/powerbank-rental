@@ -1,4 +1,5 @@
 // Deliberately self-contained simulation. No payment/hardware adapter or network imports.
+import {hasRentalPolicy,policyEstimate} from './production-rental-policy.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { transaction, recordAudit } from './production-store.mjs';
 export const testPricing = Object.freeze({ currency: 'ARS', hourlyRate: 50000, dailyCap: 300000, deposit: 1000000, version: 'test-deposit-v2', illustrative: true, testOnly: true });
@@ -12,6 +13,7 @@ export function testPayments(db) {
 }
 export function estimateTestRental(rental, time) {
   if (rental.status !== 'active') return rental;
+  if(hasRentalPolicy(rental.pricing))return policyEstimate(rental,time);
   const elapsedMs = Math.max(0, time - Date.parse(rental.startedAt));
   const durationSeconds = Math.floor(elapsedMs / 1000);
   const hours = Math.max(1, Math.ceil(elapsedMs / 3600000));

@@ -63,7 +63,7 @@ test('manual code intent survives test login using challenge CSRF, then enters s
 });
 test('active rental survives navigation, explicit history reload and bare reload',async()=>{
   for(const hash of ['', '#scan','#history']){
-    const h=await harness({status:'active',hash});assert.equal(h.run('view'),hash==='#history'?'history':'scan');
+    const h=await harness({status:'active',hash});assert.equal(h.run('view'),hash==='#history'?'history':hash==='#scan'?'scan':'home');
     for(const route of ['stations','history','profile','home']){await h.click('mobile-'+route);assert.equal(h.run('testState.rental.status'),'active');}
     await h.click('home-scan');assert.equal(h.run('view'),'scan');assert.match(text(h.elements.get('rental-flow')),/You’re charging/);
   }

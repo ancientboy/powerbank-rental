@@ -1496,3 +1496,46 @@ td {
 @media(max-width:600px){.scanner-sheet{width:100%;padding:20px;border-radius:24px 24px 0 0;max-height:calc(100dvh - 12px);padding-bottom:max(20px,env(safe-area-inset-bottom))}.scanner-frame{max-height:38dvh;aspect-ratio:auto;min-height:230px}.scanner-action{min-height:64px}}
 
 .scanner-sheet .scanner-frame[hidden]{display:none}
+
+/* Cabinet inventory: presence is distinct from availability; stale snapshots never glow green. */
+.cabinet-status{margin-top:20px;color:var(--ink);font-size:13px;min-width:0}
+.cabinet-status-line{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}
+.cabinet-connection{display:inline-flex;align-items:center;gap:7px;font-weight:600}
+.cabinet-connection::before{content:"";width:7px;height:7px;border-radius:50%;background:#91988e}
+.cabinet-connection.is-online::before{background:#24764c}
+.cabinet-count{color:var(--muted);font-size:12px}
+.cabinet-figure{margin:0;padding:20px 16px 12px;background:#f3f5ee;border-radius:18px}
+.cabinet-housing{max-width:380px;margin:auto;border:1px solid #c4cbbd;border-radius:20px 20px 14px 14px;background:linear-gradient(110deg,#fff,#e7ebdf);box-shadow:0 9px 0 -5px #d0d6c8,0 15px 22px -18px #18251a50;padding:16px 18px 12px}
+.cabinet-mast{display:flex;justify-content:space-between;align-items:center;gap:10px;padding-bottom:14px;border-bottom:1px solid #d6dccc}
+.cabinet-mast strong{font-size:23px;letter-spacing:-1px;color:#243b2e}.cabinet-mast>span{font-size:8px;letter-spacing:1.2px;color:#626e5d}
+.cabinet-slots{display:grid;grid-template-columns:repeat(auto-fit,minmax(54px,1fr));gap:12px 10px;padding:18px 0 10px}
+.cabinet-slot{display:flex;align-items:center;flex-direction:column;gap:5px;min-width:0;font-size:10px}.cabinet-slot strong{font-size:11px;font-weight:600;color:#283b2d}
+.cabinet-well{width:44px;height:70px;border-radius:7px;background:#253128;border:3px solid #bfc8b6;box-shadow:inset 0 3px 4px #0005;display:flex;align-items:flex-end;justify-content:center;padding-bottom:2px}
+.cabinet-bank{width:29px;height:59px;border-radius:5px 5px 3px 3px;background:linear-gradient(90deg,#ccd5bf,#f2f6ec 40%,#d6dfc9);border:1px solid #c1cbb4;display:grid;place-items:center;color:#556649;font-size:20px;position:relative}
+.cabinet-bank::before{content:"";position:absolute;width:12px;height:2px;top:8px;border-radius:2px;background:#9aa98b}
+.cabinet-led{height:5px;width:19px;background:#9aa293;border-radius:4px;margin:2px 0}
+.cabinet-slot.is-present .cabinet-led{background:#4d9937;box-shadow:0 0 7px #68b74470}.cabinet-slot.is-low .cabinet-led{background:#ba8620}
+.cabinet-slot-label{font-size:9px;color:#586251}.cabinet-battery{color:#53644b;font-variant-numeric:tabular-nums}
+.cabinet-base{width:50px;height:3px;border-radius:2px;background:#c3cbb9;margin:6px auto 0}
+.cabinet-figure.is-stale .cabinet-bank{background:linear-gradient(90deg,#c6cbc2,#e0e4db,#cbd1c7);color:#798472}
+.cabinet-figure.is-stale .cabinet-battery{color:#6c7467}
+.cabinet-figure figcaption{font-size:11px;line-height:1.5;color:#636d5b;text-align:center;margin-top:17px}
+.cabinet-waiting{grid-column:1/-1;min-height:95px;display:grid;place-items:center;text-align:center;color:#6c7563;font-size:12px}
+.cabinet-details{margin:16px 0;font-size:12px;color:var(--muted)}.cabinet-details summary{cursor:pointer;color:var(--ink);padding:8px 0;font-size:12px;font-weight:600}.cabinet-details p{font-size:12px;margin:8px 0;line-height:1.6}
+.cabinet-status>.button{width:100%;min-height:44px;margin-top:0}.cabinet-compact .cabinet-figure{padding-top:16px}.cabinet-compact .cabinet-housing{max-width:300px}
+.station-feature .section-heading{align-items:flex-start;gap:16px}.station-feature .section-heading .text-button{flex-shrink:0;white-space:nowrap}.below-hero{align-items:start}.below-hero .mini-card{min-height:0;align-self:start}.below-hero .price-big{font-size:clamp(24px,3vw,38px)}
+@media(max-width:1040px){.below-hero{grid-template-columns:1fr}.below-hero .mini-card{padding:24px}.station-feature .section-heading h2{font-size:22px}}
+@media(max-width:480px){.station-card{padding:20px}.cabinet-housing{padding:14px 12px 10px}.cabinet-figure{padding:16px 12px 12px}.cabinet-mast>span{font-size:7px}.cabinet-slots{gap:10px 6px}.station-feature .section-heading{flex-wrap:wrap}.below-hero .price-big{font-size:30px}}
+
+.station-map-actions{display:flex;flex-wrap:wrap;gap:10px;margin:12px 0 18px}.station-map-actions .button{white-space:normal;text-align:center}.station-location-notes{font-size:14px;line-height:1.5;color:var(--muted,#667066)}
+
+.station-qr{border-top:1px solid var(--line);margin-top:20px;padding-top:16px}.station-qr>summary{cursor:pointer;font-size:14px;font-weight:600;min-height:44px;padding:12px 0}.station-qr>summary:focus-visible{outline:3px solid var(--lime);outline-offset:3px}.station-qr-content{padding:12px 0}.station-qr-content>img{display:block;width:240px;max-width:100%;height:auto;aspect-ratio:1;margin:12px auto;background:#fff;image-rendering:pixelated}.station-qr-content>img[hidden],.station-qr-actions>[hidden]{display:none}.station-qr-id{font-family:monospace;overflow-wrap:anywhere}.station-qr-actions{display:flex;flex-wrap:wrap;gap:8px}.station-card .station-qr-actions .button{flex:1 1 140px;width:auto;margin-top:0;min-height:44px}.station-qr input{margin-top:14px;font-size:12px;min-width:0}.station-qr .form-status{min-height:20px}
+
+.home-context-actions,.home-rental-heading{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin:14px 0}.home-rental-heading{justify-content:space-between}.home-context-actions .button{margin:0}#home-station>.button{margin:8px 8px 8px 0}#home-station .home-station-name{overflow-wrap:anywhere}
+
+.below-hero.has-current-rental{grid-template-columns:1fr}.home-current-rental{text-align:left;width:100%;overflow-wrap:anywhere}.home-current-rental:empty{display:none}.home-current-rental .home-rental-heading{margin-top:20px}.home-current-rental p{font-size:14px;line-height:1.6}.home-current-rental .home-context-actions{justify-content:center}
+
+.scan-card:has(.home-current-rental:not(:empty))>h3{font-size:22px;margin-top:22px}
+
+@media(max-width:580px){#home-screen.has-current-rental .hero-copy{display:none}.home-current-rental .home-rental-heading{align-items:flex-start}.home-current-rental .home-context-actions .button{width:100%}}
+@media(max-width:580px){.below-hero.has-current-rental .mini-card{flex-direction:column;align-items:flex-start;gap:12px}.below-hero.has-current-rental .mini-card>p{max-width:none;font-size:12px}}

@@ -80,3 +80,49 @@ test('TEST refund retry appears only after a query confirms failure',async()=>{
     const h=await harness(); h.context.lab={runs:[{id:'r1',refund:{status:refundStatus},queries:queryStatus?[{refundStatus:queryStatus}]:[]}]}; h.run("renderLab($('admin-panel'),lab)"); assert.equal(flat(h.elements.get('admin-panel')).some(n=>n.textContent==='Retry TEST refund'),visible);
   }
 });
+
+test('physical order and customer support links use hardware details and expose guarded handling controls',async()=>{
+ const h=await harness({data:{hardwareRentals:[{id:'physical-1',cabinetId:'CAB',bankId:'BANK',status:'review_required',reviewReason:'release_confirmation_timeout'}]}});
+ const panel=h.render('orders');assert.match(text(panel),/physical-1.*CAB.*release_confirmation_timeout/s);assert.match(text(panel),/View \/ handle order/);
+ h.context.fetch=async(path,options)=>{h.requests.push({path,options});return {ok:true,status:200,json:async()=>({order:{id:'physical-1',status:'review_required',slot:3,bankId:'BANK',cabinetId:'CAB'},timeline:[],support:[],states:{}})};};
+ h.run("openOrder('physical-1','hardware')");await new Promise(resolve=>setImmediate(resolve));
+ const output=text(h.elements.get('admin-panel'));assert.match(output,/Handle physical rental/);assert.match(output,/Confirm no release & cancel/);assert.match(output,/Refresh cabinet inventory/);assert.doesNotMatch(output,/Send release command/);
+ const form=flat(h.elements.get('admin-panel')).find(n=>n.dataset.editor==='hardware-physical-1');set(form,'note','Verified original bank is present');
+ flat(form).find(n=>n.dataset.value==='cancel_unreleased').events.click();await submit(form);
+ const req=h.requests.find(r=>r.path==='/api/admin/hardware/resolve');assert.equal(JSON.parse(req.options.body).expectedStatus,'review_required');assert.equal(JSON.parse(req.options.body).action,'cancel_unreleased');
+});
+test('support notification polling shows new requests without replacing editor drafts',async()=>{
+ const h=await harness({data:{support:[{id:'ticket',status:'open',message:'Help'}]}});const panel=h.render('support');const reply=flat(panel).find(n=>n.name==='reply');reply.value='Draft reply to preserve';
+ const banner=flat(panel).find(n=>n.id==='inbox-notification');
+ h.context.fetch=async()=>({ok:true,status:200,json:async()=>({openSupport:2,newCustomerMessages:1,hardwareReview:1,version:'v2'})});
+ await h.run('refreshNotifications()');assert.equal(reply.value,'Draft reply to preserve');assert.match(text(banner),/2 open support requests.*1 awaiting reply/);
+ assert.match(text(banner),/Refresh inbox/);assert.doesNotMatch(text(banner),/rentals to review|Open support inbox|Review rental issues/);
+});
+
+
+test('support reminder exists only on Support and other sections do not poll it',async()=>{
+ const h=await harness();h.render('support');assert.ok(flat(h.elements.get('admin-panel')).some(n=>n.id==='inbox-notification'));
+ for(const section of ['dashboard','stations','pricing','orders','payments','users','queue','audit','integrations']) {
+  h.render(section);assert.equal(flat(h.elements.get('admin-panel')).some(n=>n.id==='inbox-notification'),false,section);
+  const before=h.requests.filter(r=>r.path==='/api/admin/notifications').length;await h.run('refreshNotifications()');
+  assert.equal(h.requests.filter(r=>r.path==='/api/admin/notifications').length,before,section);
+ }
+ h.render('support');assert.ok(flat(h.elements.get('admin-panel')).some(n=>n.id==='inbox-notification'));
+});
+
+test('late support notification cannot reappear after navigating away',async()=>{
+ const h=await harness();const panel=h.render('support'),banner=flat(panel).find(n=>n.id==='inbox-notification');let finish;
+ h.context.fetch=()=>new Promise(resolve=>{finish=resolve;});const pending=h.run('refreshNotifications()');
+ h.render('pricing');finish({ok:true,status:200,json:async()=>({openSupport:9,newCustomerMessages:8})});await pending;
+ assert.doesNotMatch(text(banner),/9 open support/);assert.equal(flat(h.elements.get('admin-panel')).some(n=>n.id==='inbox-notification'),false);
+});
+
+test('cabinet pause editor is available to operators, submits version and note, viewers cannot pause',async()=>{
+ const fixture={deviceCabinets:[{cabinetId:'CAB_TEST',newRentalsPaused:false,control:{updatedAt:'version-1'},banks:[]}]};
+ const h=await harness({role:'operator',data:fixture});h.render('stations');
+ const pause=flat(h.elements.get('admin-panel')).find(n=>n.tagName==='button'&&n.textContent==='Pause new rentals');assert.ok(pause);pause.events.click();
+ const form=flat(h.elements.get('admin-panel')).find(n=>n.id==='cabinet-control-editor');assert.ok(form);
+ set(form,'controlNote','Scheduled maintenance');await submit(form);
+ const req=h.requests.find(r=>r.path==='/api/admin/hardware/control');assert.deepEqual(JSON.parse(req.options.body),{cabinetId:'CAB_TEST',paused:true,note:'Scheduled maintenance',expectedUpdatedAt:'version-1'});
+ const viewer=await harness({role:'viewer',data:fixture});assert.doesNotMatch(text(viewer.render('stations')),/Pause new rentals|Resume new rentals/);
+});

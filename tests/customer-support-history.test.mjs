@@ -48,7 +48,7 @@ test('rental and receipt help link the selected order without sending or real ac
   const before = h.requests.length;
   const help = flat(h.elements.get('rentals')).find(n=>n.textContent==='Get help with rental');
   help.click(); assert.equal(h.run('supportRentalId'), 'test-one'); assert.equal(h.run('view'),'support');
-  assert.match(text(h.elements.get('support-form')), /TEST rental reference: test-one/);
+  assert.match(text(h.elements.get('support-form')), /Rental reference: test-one/);
   assert.equal(h.requests.length, before);
   h.run("showReceipt(testState.rentals[0])");
   flat(h.elements.get('sheet-root')).find(n=>n.textContent==='Get help with rental').click();
@@ -145,4 +145,14 @@ test('follow-up intent restores for same owner and clears for another owner', as
   const restored=await harness({storage}); assert.equal(restored.run('supportTicketId'),'case-one');assert.equal(restored.elements.get('support-message').value,'My private follow-up');
   restored.run("session={...session,user:{id:'other',isTest:true}}; account()");
   assert.equal(restored.run('supportTicketId'),null);assert.equal(restored.elements.get('support-message').value,'');
+});
+
+test('test accounts show saved station prices on home and refresh, never demo fallback',async()=>{
+ const h=await harness();let rate=500000;
+ h.context.fetch=async path=>({ok:true,status:200,json:async()=>path==='/api/user/test/stations'?{stations:[],pricing}:{stations:[],pricing:{...pricing,hourlyRate:rate}}});
+ await h.run('stations()');assert.equal(h.run('stationData.pricing.hourlyRate'),500000);assert.equal(h.run('stationData.demoPricing.hourlyRate'),50000);
+ assert.equal(h.elements.get('home-price').textContent,h.run("money(500000,'ARS')+' / hour'"));
+ rate=700000;await h.run('stations()');assert.equal(h.run('stationData.pricing.hourlyRate'),700000);
+ h.context.fetch=async path=>{if(path==='/api/user/stations')throw Error('offline');return{ok:true,status:200,json:async()=>({stations:[],pricing})};};
+ await h.run('stations()');assert.equal(h.run('stationData.pricing'),null);assert.equal(h.elements.get('home-price').textContent,'—');
 });

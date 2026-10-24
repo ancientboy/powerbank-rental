@@ -181,7 +181,7 @@ test('confirmed mutation remains visible when its following state refresh fails'
   assert.equal(h.run('testState.rental.status'), 'awaiting_pickup'); assert.match(text(h.elements.get('rental-flow')), /Waiting for pickup/);
 });
 test('focus reconciles a session ended in another tab', async () => {
-  const h = await harness({state:{rental:rental('active'),rentals:[]}}); const fetch = h.context.fetch;
+  const h = await harness({state:{rental:rental('active'),rentals:[]}}); h.run("navigate('scan')"); const fetch = h.context.fetch;
   h.context.fetch = async (path, opts) => path.endsWith('/session') ? {ok:true,json:async()=>({user:null,readiness:{googleTest:{ready:true}}})} : fetch(path, opts);
   await h.events.focus(); assert.equal(h.run('session.user'), null); assert.equal(h.run('testState'), null); assert.equal(h.run('view'), 'profile');
 });
@@ -322,5 +322,5 @@ test('gallery icon opens the local chooser only on click; manual entry expands a
 });
 test('Rent resumes an existing hardware order without dispatching or reopening the scanner',async()=>{
  const h=await harness();h.run("hardwareHistory=[{id:'h1',cabinetId:'CAB_ONE',status:'active'}]");const before=h.requests.length;await h.run('startRental()');
- assert.equal(h.context.location.assigned,'/rent?cabinet=CAB_ONE');assert.equal(h.requests.length,before);
+ assert.equal(h.context.location.assigned,'/rent?cabinet=CAB_ONE&order=h1');assert.equal(h.requests.length,before);
 });

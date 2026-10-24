@@ -68,11 +68,11 @@ test('test rental and payment records are separate and visibly marked', async ()
   assert.match(h.render('stations'), /Test stations.*TEST.*DEMO-001/);
 });
 
-test('overview counts exclude mock orders, payments, users and support', async () => {
+test('overview excludes mock financial totals but includes all customer support requests', async () => {
   const h = await admin({ stations: [], users: [{ id: 'test-user', provider: 'google_test' }], rentals: [], support: [{ testOnly: true, status: 'open' }], testRentals: [{ id: 'test-order' }], testPayments: [{ id: 'test-payment' }], testStations: [{ id: 'DEMO-001' }] });
   h.render('dashboard');
   const stats = h.elements.get('admin-panel').children[0];
-  assert.deepEqual(stats.children.map(card => card.children[1].textContent), ['0', '0', '0', '0']);
+  assert.deepEqual(stats.children.map(card => card.children[1].textContent), ['0', '0', '0', '1']);
   assert.doesNotMatch(text(stats), /Recorded rentals|Registered locations|Customer accounts/);
 });
 

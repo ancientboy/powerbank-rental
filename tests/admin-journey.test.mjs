@@ -39,7 +39,7 @@ test('station validates whitespace, paired coordinates and cabinet length before
 
 test('pricing validates exact cents and daily cap and explains test price separation', async () => {
   const h = await harness({data:{pricing:{hourlyRate:100,dailyCap:200,deposit:500,version:'p1'}}}); const form = h.render('pricing').children[0];
-  assert.match(text(form),/not existing orders or TEST prices/);
+  assert.match(text(form),/Existing orders keep their agreed rules/);
   set(form,'hourlyRate','1.001'); await submit(form); assert.equal(h.requests.length,0);
   set(form,'hourlyRate','3'); await submit(form); assert.equal(h.requests.length,0); assert.match(text(form),/at least one hour/);
   set(form,'dailyCap','4'); await submit(form); const payload = JSON.parse(h.requests[0].options.body); assert.equal(payload.expectedVersion,'p1'); assert.equal(payload.hourlyRate,300);
@@ -101,4 +101,53 @@ test('saving one support ticket preserves other drafts and their original versio
   set(first,'reply','First reply'); first.events.input(); set(second,'reply','Unsaved second reply'); second.events.input();
   h.context.fetch=async(path,options)=>{h.requests.push({path,options});return {ok:true,status:200,json:async()=>path.endsWith('/dashboard')?{support:[{...initial.support[0],reply:'First reply',updatedAt:'v2'},{...initial.support[1],updatedAt:'v2'}]}:{}};};
   await submit(first); const restored=h.elements.get('admin-panel').children[1]; assert.equal(flat(restored).find(n=>n.name==='reply').value,'Unsaved second reply'); assert.equal(restored.dataset.expectedUpdatedAt,'v1'); assert.equal(h.run('dirtyForms.size'),1);
+});
+
+test('buyout settings share pricing form, validate caps and days, and submit cents plus whole days',async()=>{
+ const h=await harness({data:{hardwarePricing:{hourlyRate:50000,dailyCap:300000,deposit:1000000,totalCap:1000000,maxRentalDays:0}}});const form=h.render('pricing').children[0];assert.match(text(form),/Buyout after days/);
+ set(form,'maxRentalDays','1.5');await submit(form);assert.equal(h.requests.length,0);
+ set(form,'maxRentalDays','3');set(form,'totalCap','20000');await submit(form);assert.equal(h.requests.length,0);
+ set(form,'totalCap','10000');await submit(form);const p=JSON.parse(h.requests[0].options.body);assert.equal(p.maxRentalDays,3);assert.equal(p.totalCap,1000000);assert.equal(p.expectedVersion,null);
+});
+
+test('explicit close and reopen preserve optimistic version without requiring a public reply',async()=>{
+ for(const [status,label,next] of [['open','Close ticket','closed'],['closed','Reopen ticket','open']]){
+  const h=await harness({data:{support:[{id:'case',status,updatedAt:'v1',replies:[]}]}});const form=h.render('support').children[0];
+  await flat(form).find(n=>n.textContent===label).events.click();
+  assert.deepEqual(JSON.parse(h.requests[0].options.body),{id:'case',status:next,reply:'',expectedUpdatedAt:'v1'});
+ }
+});
+test('closing never silently sends or discards a draft and viewer cannot close',async()=>{
+ const h=await harness({data:{support:[{id:'case',status:'open'}]}});const form=h.render('support').children[0];set(form,'reply','Unfinished reply');
+ await flat(form).find(n=>n.textContent==='Close ticket').events.click();assert.equal(h.requests.length,0);assert.match(text(form),/Send or clear your draft/);
+ const v=await harness({role:'viewer',data:{support:[{id:'case',status:'open'}]}});const button=flat(v.render('support')).find(n=>n.textContent==='Close ticket');assert.equal(button.disabled,true);await button.events.click();assert.equal(v.requests.length,0);
+});
+
+test('station editor previews coordinates and saves entrance notes with selected unassigned cabinet',async()=>{
+ const h=await harness({data:{stations:[{id:'other',cabinetId:'TAKEN'}],deviceCabinets:[{cabinetId:'TAKEN'},{cabinetId:'FREE'}]}});h.render('stations');h.run('stationEditor()');const form=h.elements.get('admin-panel').children[0];
+ assert.equal(flat(form).filter(n=>n.tagName==='button'&&n.textContent==='TAKEN').length,0);
+ await flat(form).find(n=>n.tagName==='button'&&n.textContent==='FREE').events.click();
+ assert.equal(flat(form).find(n=>n.name==='cabinetId').value,'FREE');
+ set(form,'name','Store');set(form,'address','Street');set(form,'latitude','-34.6037');set(form,'longitude','-58.3816');set(form,'locationNotes','Floor 1');
+ flat(form).find(n=>n.className==='form-grid').events.input();
+ assert.ok(flat(form).some(n=>n.href==='https://www.google.com/maps/search/?api=1&query=-34.6037%2C-58.3816'));
+ await submit(form);const saved=JSON.parse(h.requests.find(x=>x.path==='/api/admin/stations').options.body);assert.equal(saved.cabinetId,'FREE');assert.equal(saved.locationNotes,'Floor 1');assert.equal(saved.latitude,-34.6037);
+});
+
+test('Stations automatically presents one QR per bound/configured cabinet, with downloads and print; no writes on render', async()=>{
+ const h=await harness({role:'viewer',data:{stations:[{id:'s1',name:'Store',cabinetId:'BOUND'},{id:'s2',name:'New store',cabinetId:'NEW'}],deviceCabinets:[{cabinetId:'BOUND'},{cabinetId:'UNBOUND'}]}});
+ const panel=h.render('stations');const nodes=flat(panel);const images=nodes.filter(n=>n.tagName==='img'&&n.src?.includes('/api/admin/cabinet-qr'));
+ assert.equal(images.length,3);assert.match(text(panel),/Device connection still needs/);
+ for(const id of ['BOUND','NEW','UNBOUND']){
+  assert.ok(nodes.some(n=>n.href===`/api/admin/cabinet-qr?cabinet=${id}&format=png&download=1`));
+  assert.ok(nodes.some(n=>n.href===`/api/admin/cabinet-qr?cabinet=${id}&format=svg&download=1`));
+  assert.ok(nodes.some(n=>n.href===`/admin/cabinet-label?cabinet=${id}`&&n.rel==='noopener'));
+ }
+ assert.equal(h.requests.filter(r=>r.options?.method==='POST').length,0);
+ images[0].events.error();assert.equal(images[0].hidden,true);assert.match(text(panel),/QR unavailable/);
+});
+test('empty station list explains binding, invalid legacy IDs have no broken QR image', async()=>{
+ const empty=await harness();assert.match(text(empty.render('stations')),/Bind a cabinet ID/);
+ const legacy=await harness({data:{stations:[{cabinetId:'old invalid',name:'Legacy'}]}});
+ const panel=legacy.render('stations');assert.match(text(panel),/Update this cabinet ID/);assert.equal(flat(panel).filter(n=>n.tagName==='img'&&n.src?.includes('/cabinet-qr')).length,0);
 });

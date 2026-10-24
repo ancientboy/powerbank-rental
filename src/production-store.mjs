@@ -50,6 +50,7 @@ export function openProductionStore(path) {
   CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, google_sub TEXT NOT NULL UNIQUE, email TEXT, name TEXT, created_at TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('admin','user')), subject TEXT NOT NULL, csrf TEXT NOT NULL, expires INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS oauth_states(state_hash TEXT PRIMARY KEY, binding_hash TEXT NOT NULL, nonce TEXT NOT NULL, verifier TEXT NOT NULL, expires INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS oauth_return_paths(state_hash TEXT PRIMARY KEY REFERENCES oauth_states(state_hash) ON DELETE CASCADE, path TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS rate_limits(key TEXT PRIMARY KEY, attempts INTEGER NOT NULL, expires INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS records(kind TEXT NOT NULL, id TEXT NOT NULL, owner_id TEXT, data TEXT NOT NULL, PRIMARY KEY(kind,id));
   CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -96,8 +97,11 @@ export function recordAudit(db, actor, action, target, now = Date.now(), changes
   ).run(actor, action, target, new Date(now).toISOString());
   // Explicit field allowlists prevent credentials, messages and arbitrary payloads entering audit.
   const fields = {
-    'station.save': ['id','name','address','cabinetId','latitude','longitude','active','updatedAt'],
-    'pricing.update': ['currency','hourlyRate','dailyCap','deposit','version','updatedAt'],
+    'station.save': ['id','name','address','cabinetId','latitude','longitude','locationNotes','openingHours','returnInstructions','capacity','active','updatedAt'],
+    'cabinet.control': ['id','paused','note','updatedAt'],
+    'pricing.update': ['currency','hourlyRate','dailyCap','deposit','totalCap','maxRentalDays','policyVersion','version','updatedAt'],
+    'hardware.rental.buyout': ['id','status','totalAmount','depositApplied','refundAmount','boughtOutAt','endedAt','buyoutReason','settlementStatus'],
+    'hardware.rental.handle': ['id','status','settlementStatus','reviewReason','bankId','slot','returnedAt','cancelledAt','totalAmount','refundAmount','settlementReviewedAt'],
     'support.update': ['id','status','rentalId','testOnly','updatedAt'],
   }[action];
   if (changes && fields) {

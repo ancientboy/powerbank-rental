@@ -292,3 +292,56 @@ test("SQLite formal schema migration is idempotent and survives reopen", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('pricing validates buyout settings, persists immutable history, and rejects stale saves',async()=>{
+ const s=setup();try{const a=await admin(s);const base={currency:'ARS',hourlyRate:50000,dailyCap:300000,deposit:1000000,totalCap:1000000,maxRentalDays:3,expectedVersion:null};
+ for(const change of [{totalCap:1000001},{totalCap:49999},{maxRentalDays:-1},{maxRentalDays:1.5},{maxRentalDays:366}])assert.equal((await s.request('/api/admin/pricing',{...base,...change},a.cookie,a.csrf)).status,400);
+ const first=await s.request('/api/admin/pricing',base,a.cookie,a.csrf);assert.equal(first.status,200);const p=(await first.json()).pricing;assert.equal(p.totalCap,1000000);assert.equal(p.maxRentalDays,3);assert.equal(p.policyVersion,1);
+ assert.equal((await s.request('/api/admin/pricing',base,a.cookie,a.csrf)).status,409);
+ const next=await s.request('/api/admin/pricing',{...base,maxRentalDays:0,expectedVersion:p.version},a.cookie,a.csrf);assert.equal(next.status,200);
+ const data=await(await s.request('/api/admin/dashboard',null,a.cookie)).json();assert.equal(data.hardwarePricing.maxRentalDays,0);assert.equal(data.hardwarePricing.totalCap,1000000);assert.equal(data.pricingHistory.find(h=>h.version===p.version).maxRentalDays,3);
+ }finally{s.db.close();}
+});
+
+test('support can close without reply, leaves queue, rejects stale changes and reopens',async()=>{
+ const s=setup();try{const a=await admin(s,'operator'),u=user(s,'support-owner');
+ putRecord(s.db,'support','case',{id:'case',userId:'support-owner',status:'open',message:'Please help',replies:[]},'support-owner');
+ const payload={id:'case',status:'closed',reply:'',expectedUpdatedAt:null};
+ assert.equal((await s.request('/api/admin/support',payload)).status,401);
+ assert.equal((await s.request('/api/admin/support',payload,a.cookie)).status,403);
+ const r=await s.request('/api/admin/support',payload,a.cookie,a.csrf);assert.equal(r.status,200);const ticket=(await r.json()).support;assert.equal(ticket.status,'closed');assert.deepEqual(ticket.replies,[]);
+ const dashboard=await(await s.request('/api/admin/dashboard',null,a.cookie)).json();assert.ok(!dashboard.workQueue.some(x=>x.supportId==='case'));
+ const own=await(await s.request('/api/user/support',null,u.cookie)).json();assert.equal(own.support[0].status,'closed');assert.equal(own.support[0].message,'Please help');
+ assert.equal((await s.request('/api/admin/support',{...payload,status:'open'},a.cookie,a.csrf)).status,409);
+ assert.equal((await s.request('/api/admin/support',{...payload,status:'open',expectedUpdatedAt:ticket.updatedAt},a.cookie,a.csrf)).status,200);
+ const reopened=await(await s.request('/api/admin/dashboard',null,a.cookie)).json();assert.ok(reopened.workQueue.some(x=>x.supportId==='case'));
+ }finally{s.db.close();}
+});
+test('public station prices match hardware prices before and after admin updates',async()=>{
+ const s=setup();try{const a=await admin(s);let dashboard=await(await s.request('/api/admin/dashboard',null,a.cookie)).json();
+ assert.deepEqual((await(await s.request('/api/user/stations')).json()).pricing,dashboard.hardwarePricing);
+ const p={currency:'ARS',hourlyRate:500000,dailyCap:3000000,deposit:10000000,totalCap:10000000,maxRentalDays:2};
+ assert.equal((await s.request('/api/admin/pricing',p,a.cookie,a.csrf)).status,200);
+ dashboard=await(await s.request('/api/admin/dashboard',null,a.cookie)).json();const res=await s.request('/api/user/stations');assert.equal(res.headers.get('Cache-Control'),'no-store');
+ assert.deepEqual((await res.json()).pricing,dashboard.hardwarePricing);
+ }finally{s.db.close();}
+});
+
+test('station location saves, publishes, moves and keeps a unique cabinet binding', async () => {
+  const s = setup(), a = await admin(s);
+  const draft = {name:'Store Alpha',address:'123 Example Street',cabinetId:'LOCATION_FIXTURE',latitude:-34.6037,longitude:-58.3816,locationNotes:'Ground floor, beside reception',active:true};
+  let response = await s.request('/api/admin/stations',draft,a.cookie,a.csrf); assert.equal(response.status,200);
+  let station = (await response.json()).station;
+  let list = (await(await s.request('/api/user/stations')).json()).stations;
+  assert.deepEqual(list.find(x=>x.id===station.id),{...station,device:null});
+  assert.equal((await s.request('/api/admin/stations',draft,a.cookie,a.csrf)).status,409);
+  assert.equal((await s.request('/api/admin/stations',{...draft,cabinetId:'INVALID',latitude:null},a.cookie,a.csrf)).status,400);
+  assert.equal((await s.request('/api/admin/stations',{...draft,cabinetId:'INVALID',locationNotes:'a'.repeat(501)},a.cookie,a.csrf)).status,400);
+  const previous=station.updatedAt;
+  response=await s.request('/api/admin/stations',{...station,expectedUpdatedAt:previous,latitude:0,longitude:0,address:'New address',locationNotes:'New entrance'},a.cookie,a.csrf);
+  assert.equal(response.status,200);station=(await response.json()).station;
+  list=(await(await s.request('/api/user/stations')).json()).stations;assert.equal(list.length,1);assert.equal(list[0].latitude,0);assert.equal(list[0].locationNotes,'New entrance');
+  assert.equal((await s.request('/api/admin/stations',{...station,expectedUpdatedAt:previous},a.cookie,a.csrf)).status,409);
+  assert.equal((await s.request('/api/admin/stations',{...station,active:false,expectedUpdatedAt:station.updatedAt},a.cookie,a.csrf)).status,200);
+  assert.equal((await(await s.request('/api/user/stations')).json()).stations.length,0);s.db.close();
+});

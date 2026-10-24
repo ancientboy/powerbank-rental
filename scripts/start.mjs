@@ -1,3 +1,4 @@
+import {maintainHardware} from '../src/production-hardware-rental.mjs';
 import http from "node:http";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -12,14 +13,22 @@ if (!config.secure && !["127.0.0.1", "localhost", "::1"].includes(config.host))
   throw new Error("Local HTTP must bind loopback only");
 const db = openProductionStore(config.databasePath),
   api = createProductionAPI({ db, config });
+maintainHardware(db);
+const rentalMaintenance=setInterval(()=>{try{maintainHardware(db);}catch{console.error('Rental maintenance failed; retained reservations require review');}},15000);
+rentalMaintenance.unref();
 const assets = new Map([
   ["/", "index.html"],
   ["/rent", "rent.html"],
   ["/rent.js", "rent.js"],
   ["/rent.css", "rent.css"],
+  ["/google-signin.css", "google-signin.css"],
+  ["/google-signin.png", "google-signin.png"],
   ["/cabinet-test-qr.png", "cabinet-test-qr.png"],
   ["/auth/error", "index.html"],
   ["/admin", "admin.html"],
+  ["/admin/cabinet-label", "cabinet-label.html"],
+  ["/cabinet-label.js", "cabinet-label.js"],
+  ["/cabinet-label.css", "cabinet-label.css"],
   ["/admin/", "admin.html"],
   ["/admin/login", "admin.html"],
   ["/app.js", "app.js"],
@@ -117,6 +126,7 @@ server.listen(config.port, config.host, () =>
 for (const signal of ["SIGINT", "SIGTERM"])
   process.on(signal, () =>
     server.close(() => {
+      clearInterval(rentalMaintenance);
       db.close();
       process.exit(0);
     }),

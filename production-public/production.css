@@ -7,3 +7,13 @@
 
 /* Administrator operations tools, scoped away from the customer experience. */
 .admin-body .ops-filters{display:grid;gap:20px}.admin-body .ops-filters .form-grid{margin:0}.admin-body .status-segments button[aria-pressed="true"]{background:var(--lime,#d7ff3f);border-color:#25351c;color:#172411}.admin-body .ops-detail{display:grid;gap:20px;margin-top:24px}.admin-body .ops-facts{display:grid;grid-template-columns:minmax(120px,1fr) minmax(0,2fr);gap:12px 20px;font-size:14px}.admin-body .ops-facts dt{color:var(--muted)}.admin-body .ops-facts dd{margin:0;overflow-wrap:anywhere}.admin-body .ops-conversation{margin:20px 0;border-top:1px solid var(--line)}.admin-body .ops-conversation article{padding:14px 0;border-bottom:1px solid var(--line)}.admin-body .ops-conversation p{white-space:pre-wrap;overflow-wrap:anywhere}.admin-body .ops-audit{min-width:180px;max-width:440px}.admin-body .ops-audit summary{cursor:pointer}.admin-body .ops-audit pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;background:var(--wash);padding:12px;border-radius:10px;max-height:320px;overflow:auto}.admin-body .ops-nav-group{display:block;padding:18px 14px 4px;margin:0;font-size:10px}.admin-body .ops-lab{display:grid;gap:20px;margin-top:24px}.admin-body .ops-lab .card{margin:0}@media(max-width:700px){.admin-body .ops-nav-group{align-self:center;padding:0 10px}.admin-body .ops-facts{grid-template-columns:1fr;gap:6px}.admin-body .ops-facts dd{margin-bottom:10px}.admin-body .ops-filters .button{white-space:normal}}
+
+/* Inbox updates sit above the work area and never displace navigation or drafts. */
+#inbox-notification{display:flex;flex-wrap:wrap;gap:10px;align-items:center;max-width:100%;margin:0 0 20px}#inbox-notification p{flex:1 1 260px;margin:0}#inbox-notification .button{white-space:normal;gap:8px} @media(max-width:700px){#inbox-notification{padding:14px}#inbox-notification .button{flex:1 1 140px}}
+
+/* Cabinet labels stay independent of store names and live rental status. */
+.admin-body .cabinet-qr-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,270px),1fr));gap:20px;margin-top:24px}
+.admin-body .cabinet-qr-card{border:1px solid #e2e5dc;border-radius:16px;padding:24px;min-width:0;background:#fff}
+.admin-body .cabinet-qr-card h4{font-size:17px;margin:0 0 8px}.admin-body .cabinet-qr-id{font-family:monospace;overflow-wrap:anywhere;margin:0 0 16px}
+.admin-body .cabinet-qr-card img{display:block;max-width:100%;height:auto;aspect-ratio:1;background:#fff;image-rendering:pixelated}
+.admin-body .cabinet-qr-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px;align-items:center}.admin-body .cabinet-qr-actions .muted-link{width:100%}

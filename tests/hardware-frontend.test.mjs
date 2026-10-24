@@ -6,13 +6,13 @@ class Element{constructor(tag='div'){this.tag=tag;this.children=[];}append(...n)
 const flat=n=>[n,...n.children.flatMap(flat)];
 const text=n=>typeof n==='string'?n:[n.textContent||'',...n.children.map(text)].join(' ');
 const pricing={currency:'ARS',hourlyRate:50000,dailyCap:300000,deposit:1000000};
-async function page({user={id:'test_a',isTest:true},rental=null,query='?cabinet=CAB_TEST',fresh=true}={}){
+async function page({user={id:'test_a',isTest:true},rental=null,query='?cabinet=CAB_TEST',fresh=true,readiness={googleTest:{ready:true}}}={}){
  const elements=new Map(),requests=[];let payError=false;
  const state={enabled:true,dispatchEnabled:true,authorized:true,userId:'test_a',serverNow:new Date().toISOString(),pricing,cabinets:[{cabinetId:'CAB_TEST',connection:'online',inventoryState:'observed',inventoryObservedAt:new Date().toISOString(),banks:[{slot:3,batteryPercent:100}]}],rental,rentals:rental?[rental]:[]};
  const document={getElementById:id=>{for(const e of elements.values()){const found=flat(e).find(n=>n.id===id);if(found)return found;}if(!elements.has(id))elements.set(id,new Element());return elements.get(id);},createElement:tag=>new Element(tag)};
  const context=vm.createContext({document,location:{href:'https://example.test/rent'+query},URL,Intl,Date,setInterval(){},setTimeout(fn){queueMicrotask(fn);},fetch:async(path,opt)=>{
   requests.push({path,opt});let data={ok:true};
-  if(path==='/api/user/session')data={user,csrf:'csrf'};
+  if(path==='/api/user/session')data={user,csrf:'csrf',readiness};
   if(path.endsWith('/state'))data=structuredClone(state);
   if(path.endsWith('/refresh')&&fresh)state.cabinets[0].inventoryObservedAt=new Date().toISOString();
   if(path.endsWith('/create')){state.rental={id:'order1',cabinetId:'CAB_TEST',status:'pending_payment',pricing,createdAt:new Date().toISOString(),depositPaid:0};state.rentals=[state.rental];data={rental:state.rental};}
@@ -63,4 +63,16 @@ test('customer rental surfaces are English and share Smile navigation destinatio
  for(const file of ['rent.html','rent.js','index.html','app.js']){const source=await readFile(new URL('../production-public/'+file,import.meta.url),'utf8');assert.doesNotMatch(source,/[\u3400-\u9fff]/);}
  const html=await readFile(new URL('../production-public/rent.html',import.meta.url),'utf8');assert.match(html,/<html lang="en">/);
  for(const route of ['/#stations','/#history','/#profile'])assert.ok(html.includes('href="'+route+'"'));
+});
+
+
+test('scan uses configured Google login, preserves cabinet, and fails closed without a provider',async()=>{
+ const google=await page({user:null,readiness:{google:{ready:true},googleTest:{ready:false}}});
+ const links=flat(google.elements.get('flow')).filter(n=>n.tag==='a');
+ assert.equal(links.length,1);assert.equal(links[0].href,'/auth/google?cabinet=CAB_TEST');
+ assert.match(text(google.elements.get('flow')),/Sign in with Google/);
+ assert.equal(google.requests.some(r=>r.path.includes('test-login')),false);
+ const disabled=await page({user:null,readiness:{}});
+ assert.match(text(disabled.elements.get('flow')),/Sign-in is currently unavailable/);
+ assert.equal(flat(disabled.elements.get('flow')).some(n=>n.id==='login'),false);
 });

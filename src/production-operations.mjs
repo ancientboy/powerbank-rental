@@ -1,4 +1,5 @@
 // Read-only operational projections. No device or payment execution lives here.
+import { hardwareOrders } from './production-hardware-rental.mjs';
 import { listRecords } from './production-store.mjs';
 import { testRentals, estimateTestRental } from './production-test-rental.mjs';
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
@@ -18,7 +19,7 @@ export function pricingHistory(db, current) {
   return history.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
 }
 export function orders(db, mode, time) {
-  return mode === 'test' ? testRentals(db).map(r => estimateTestRental(r, time)) : listRecords(db, 'rental');
+  return mode === 'hardware' ? hardwareOrders(db).map(r=>estimateTestRental(r,time)) : mode === 'test' ? testRentals(db).map(r => estimateTestRental(r, time)) : listRecords(db, 'rental');
 }
 export function operationQueue(db) {
   const items = [];
@@ -27,19 +28,30 @@ export function operationQueue(db) {
       if (['review_required', 'legacy_review'].includes(r.settlementStatus)) items.push({ id: mode + ':rental:' + r.id, type: 'settlement_review', mode, rentalId: r.id, reason: r.settlementStatus, status: r.status, createdAt: r.returnedAt || r.createdAt || null });
     }
   }
+  for(const r of hardwareOrders(db)){
+    if(r.buyoutReview||r.status==='review_required'||r.settlementStatus==='review_required'&&!r.settlementReviewedAt)items.push({id:'hardware:'+r.id,type:'hardware_review',mode:'hardware',rentalId:r.id,reason:r.reviewReason||'settlement_review',status:r.status,createdAt:r.reviewAt||r.createdAt});
+  }
   for (const t of listRecords(db, 'support')) {
-    if (['open', 'in_progress'].includes(t.status)) items.push({ id: 'support:' + t.id, type: 'support', mode: t.testOnly === true ? 'test' : 'live', supportId: t.id, rentalId: t.rentalId || null, reason: 'support_' + t.status, status: t.status, createdAt: t.createdAt || null });
+    if (['open', 'in_progress'].includes(t.status)) items.push({ id: 'support:' + t.id, type: 'support', mode: t.rentalMode || (t.testOnly === true ? 'test' : 'live'), supportId: t.id, rentalId: t.rentalId || null, reason: 'support_' + t.status, status: t.status, createdAt: t.createdAt || null });
   }
   return items.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
 }
 export function orderResponse(db, url, time, id = null) {
   const mode = url.searchParams.get('mode');
-  if (!['live', 'test'].includes(mode)) fail(400, 'Choose mode=live or mode=test');
+  if (!['live', 'test', 'hardware'].includes(mode)) fail(400, 'Choose mode=live, mode=test or mode=hardware');
   const serverNow = new Date(time).toISOString();
   const all = orders(db, mode, time);
   if (id !== null) {
     const order = all.find(r => r.id === id);
     if (!order) fail(404, 'Order not found');
+    if(mode==='hardware'){
+      const payments=listRecords(db,'hardware_payment',order.userId).filter(p=>p.rentalId===id);
+      const support=listRecords(db,'support',order.userId).filter(t=>t.rentalId===id).map(supportView);
+      const command=listRecords(db,'wscharge_command').find(c=>c.id===order.commandId)||null;
+      const events=listRecords(db,'wscharge_event').filter(e=>e.bankId===order.bankId&&e.observedAtSeconds*1000>=Date.parse(order.dispatchedAt||order.createdAt)&&(!order.returnedAt||e.observedAtSeconds*1000<=Date.parse(order.returnedAt)));
+      const timeline=[...payments.map(p=>({...p,type:p.type,at:p.createdAt})),...events.map(e=>({id:e.id,type:'device_'+e.code,status:e.statusCode,at:new Date(e.observedAtSeconds*1000).toISOString()})),...(order.handlingHistory||[]).map(e=>({...e,type:'operator_'+e.action,at:e.createdAt}))].sort((a,b)=>a.at.localeCompare(b.at));
+      return {mode,serverNow,order,payments,support,timeline,command,events,states:{rental:order.status,payment:order.settlementStatus,device:order.reviewReason||(order.startedAt?'release_confirmed':'release_unconfirmed')}};
+    }
     const ownerRow = mode === 'test' ? db.prepare('SELECT owner_id FROM test_rentals WHERE id=?').get(id) : db.prepare("SELECT owner_id FROM records WHERE kind='rental' AND id=?").get(id);
     const owner = ownerRow?.owner_id;
     const paymentRows = mode === 'test' ? db.prepare("SELECT owner_id,data FROM test_records WHERE kind='payment'").all() : db.prepare("SELECT owner_id,data FROM records WHERE kind='payment'").all();
@@ -56,7 +68,7 @@ export function orderResponse(db, url, time, id = null) {
   let result = all;
   const q = (url.searchParams.get('q') || '').trim().toLowerCase();
   if (q.length > 200) fail(400, 'Search must be at most 200 characters');
-  if (q) result = result.filter(r => [r.id,r.userId,r.stationId,r.stationName].some(v => String(v || '').toLowerCase().includes(q)));
+  if (q) result = result.filter(r => [r.id,r.userId,r.stationId,r.stationName,r.cabinetId,r.bankId].some(v => String(v || '').toLowerCase().includes(q)));
   for (const field of ['status','settlementStatus','stationId']) {
     const value = url.searchParams.get(field);
     if (value) result = result.filter(r => r[field] === value);

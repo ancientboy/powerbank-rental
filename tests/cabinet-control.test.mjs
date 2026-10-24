@@ -1,0 +1,51 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {createHash} from 'node:crypto';
+import {openProductionStore,listRecords} from '../src/production-store.mjs';
+import {saveCabinetControl,cabinetControl} from '../src/production-cabinet-control.mjs';
+import {createProductionAPI} from '../src/production-api.mjs';
+import {sendWschargeCommand,customerStations} from '../src/production-wscharge.mjs';
+const config={publicOrigin:'https://example.test',wschargeEnabled:true,wschargeDispatchEnabled:true,wschargeCabinets:['CAB_TEST'],wschargeApiToken:'test-only-api-token',wschargeCallbackToken:'test-only-callback-token'};
+const time=Date.parse('2026-10-23T10:00:00Z'),owner={id:'owner',role:'owner'};
+const change={cabinetId:'CAB_TEST',paused:true,note:'Routine maintenance',expectedUpdatedAt:null};
+test('pause persistence, optimistic concurrency and direct release protection',async t=>{
+ const dir=mkdtempSync(join(tmpdir(),'cabinet-control-'));let db=openProductionStore(join(dir,'isolated.sqlite'));t.after(()=>{db.close();rmSync(dir,{recursive:true});});
+ assert.throws(()=>saveCabinetControl(db,config,{id:'v',role:'viewer'},change,time),e=>e.status===403);
+ assert.throws(()=>saveCabinetControl(db,config,owner,{...change,cabinetId:'OTHER'},time),e=>e.status===404);
+ assert.throws(()=>saveCabinetControl(db,config,owner,{...change,paused:'true'},time),e=>e.status===400);
+ const first=saveCabinetControl(db,config,owner,change,time).control;
+ assert.throws(()=>saveCabinetControl(db,config,owner,change,time),e=>e.status===409);
+ db.close();db=openProductionStore(join(dir,'isolated.sqlite'));assert.equal(cabinetControl(db,'CAB_TEST').paused,true);
+ let calls=0;const send=body=>sendWschargeCommand({db,config,actor:owner,body,idempotencyKey:'isolated-command',time,fetchImpl:async()=>{calls++;return new Response('{"code":200}');}});
+ await assert.rejects(send({code:65,cabinetId:'CAB_TEST',slot:1}),e=>e.status===409);assert.equal(calls,0);assert.equal(listRecords(db,'wscharge_command').length,0);
+ assert.equal(JSON.stringify(customerStations(db,config,time)).includes('Routine maintenance'),false);
+ await send({code:64,cabinetId:'CAB_TEST'});assert.equal(calls,1);
+ const resumed=saveCabinetControl(db,config,owner,{...change,paused:false,note:'Maintenance complete',expectedUpdatedAt:first.updatedAt},time).control;
+ assert.notEqual(resumed.updatedAt,first.updatedAt);assert.equal(cabinetControl(db,'CAB_TEST').paused,false);
+ const audit=listRecords(db,'audit_detail').filter(r=>r.after?.id==='CAB_TEST');assert.equal(audit.length,2);assert.equal(audit[0].after.paused,true);assert.equal(audit[1].after.paused,false);
+});
+test('control endpoint requires authenticated operator and CSRF; station operational fields validate and persist',async t=>{
+ const db=openProductionStore(':memory:');t.after(()=>db.close());
+ for(const role of ['owner','operator','viewer']){
+  db.prepare('INSERT INTO admins VALUES(?,?,?,?,0)').run(role,role,'unused-test-only-hash',role);
+  db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?)').run(createHash('sha256').update(createHash('sha256').update(role).digest('base64url')).digest('hex'),'admin',role,'csrf',time+86400000);
+ }
+ const api=createProductionAPI({db,config,now:()=>time});
+ const request=(path,body,role='owner',csrf='csrf')=>api(new Request(config.publicOrigin+path,{method:'POST',headers:{cookie:'voltgo_admin='+createHash('sha256').update(role).digest('base64url'),'content-type':'application/json',origin:config.publicOrigin,'x-csrf-token':csrf},body:JSON.stringify(body)}));
+ const endpoint='/api/admin/hardware/control';
+ assert.equal((await request(endpoint,change,'unknown')).status,401);
+ assert.equal((await request(endpoint,change,'viewer')).status,403);
+ assert.equal((await request(endpoint,change,'operator','wrong')).status,403);
+ assert.equal((await request(endpoint,change,'operator')).status,200);
+ const station={name:'Test store',address:'Test street',cabinetId:'CAB_TEST',active:true,latitude:-34.6,longitude:-58.4,openingHours:'Mon–Fri 09:00–18:00',returnInstructions:'Ask reception. If full, contact support.',capacity:8};
+ assert.equal((await request('/api/admin/stations',{...station,capacity:8.5})).status,400);
+ assert.equal((await request('/api/admin/stations',{...station,capacity:129})).status,400);
+ const saved=await (await request('/api/admin/stations',station)).json();assert.ok(saved.station?.id);
+ const {openingHours,returnInstructions,capacity,...legacy}=saved.station;
+ const edited=await (await request('/api/admin/stations',{...legacy,name:'Updated store'})).json();
+ assert.equal(edited.station.openingHours,station.openingHours);assert.equal(edited.station.capacity,8);assert.equal(edited.station.returnInstructions,station.returnInstructions);
+ const shown=customerStations(db,config,time)[0];assert.equal(shown.device.newRentalsPaused,true);assert.equal(shown.openingHours,station.openingHours);
+});
